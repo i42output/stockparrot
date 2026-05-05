@@ -26,14 +26,10 @@ misrepresented as being the original software.
 
 #include <stockparrot/chess.hpp>
 
-using namespace stockparrot;
-
 int main() {
-    engineInit();
+    stockparrot::Engine engine;
 
-    Board       board;
     std::string line;
-
     while (std::getline(std::cin, line)) {
         std::istringstream ss(line);
         std::string token;
@@ -48,14 +44,13 @@ int main() {
             std::cout << "readyok\n";
         }
         else if (token == "ucinewgame") {
-            board.setFromFEN(START_FEN);
-            std::fill(TT, TT + TT_SIZE, TTEntry{});
+            engine.newGame();
         }
         else if (token == "position") {
             std::string type;
             ss >> type;
             if (type == "startpos") {
-                board.setFromFEN(START_FEN);
+                engine.setPosition(stockparrot::START_FEN);
             }
             else if (type == "fen") {
                 std::string fen, part;
@@ -63,15 +58,14 @@ int main() {
                     if (part == "moves") break;
                     fen += (i ? " " : "") + part;
                 }
-                board.setFromFEN(fen);
+                engine.setPosition(fen);
                 std::string maybe;
                 if (part != "moves") ss >> maybe;
             }
             std::string tok;
             while (ss >> tok) {
                 if (tok == "moves") continue;
-                Move m = parseMove(board, tok);
-                if (!m.isNull()) makeMove(board, m);
+                engine.applyMove(tok);
             }
         }
         else if (token == "go") {
@@ -87,14 +81,14 @@ int main() {
             if (movetime > 0) {
                 timeLimit = movetime;
             }
-            else if (board.sideToMove == WHITE && wtime > 0) {
+            else if (engine.board.sideToMove == stockparrot::WHITE && wtime > 0) {
                 timeLimit = std::max(100, wtime / 30);
             }
-            else if (board.sideToMove == BLACK && btime > 0) {
+            else if (engine.board.sideToMove == stockparrot::BLACK && btime > 0) {
                 timeLimit = std::max(100, btime / 30);
             }
-            const int maxD = (depth > 0) ? depth : MAX_DEPTH;
-            Move best = searchBestMove(board, timeLimit, maxD);
+            const int maxD = (depth > 0) ? depth : stockparrot::MAX_DEPTH;
+            stockparrot::Move best = engine.search(timeLimit, maxD);
             std::cout << "bestmove " << best.toString() << "\n";
             std::cout.flush();
         }
@@ -102,18 +96,19 @@ int main() {
             break;
         }
         else if (token == "d") {
+            const auto& board = engine.board;
             std::cout << "\n";
             for (int rank = 7; rank >= 0; rank--) {
                 std::cout << (rank + 1) << "  ";
                 for (int file = 0; file < 8; file++) {
                     int sq = rank * 8 + file;
-                    if (board.mailbox[sq] == NO_PIECE) {
+                    if (board.mailbox[sq] == stockparrot::NO_PIECE) {
                         std::cout << ". ";
                     }
                     else {
                         int p = board.mailbox[sq];
                         int c = board.mailboxColor[sq];
-                        std::cout << (char)(c == WHITE ? "PNBRQK"[p] : "pnbrqk"[p]) << " ";
+                        std::cout << (char)(c == stockparrot::WHITE ? "PNBRQK"[p] : "pnbrqk"[p]) << " ";
                     }
                 }
                 std::cout << "\n";
