@@ -1,2 +1,2 @@
 # stockparrot
-Stockparrot - an AI generated chess engine
+Stockparrot - an AI generated C++ chess engine
