@@ -1183,19 +1183,33 @@ namespace stockparrot {
                 }
 
                 {
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - info.startTime).count();
-                    long long nps = elapsed > 0 ? (info.nodes * 1000LL) / elapsed : 0;
-                    std::string infoLine =
-                        "info depth " + std::to_string(depth) +
-                        " time " + std::to_string(elapsed) +
-                        " nodes " + std::to_string(info.nodes) +
-                        " nps " + std::to_string(nps) +
-                        " score cp " + std::to_string(bestScore) +
-                        " pv " + bestMove.toString();
-                    if (client) client->response(*this, infoLine);
-                    else        std::cerr << infoLine << "\n";
-                    if (elapsed * 2 > timeLimitMs) break;
+                    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - info.startTime);
+                    long long nps = elapsedMs.count() > 0
+                        ? (info.nodes * 1000LL) / elapsedMs.count() : 0;
+
+                    if (client) {
+                        // Typed callback for structured consumers
+                        client->info(depth, elapsedMs, info.nodes, nps,
+                            bestScore, bestMove.toString());
+                        // Standard UCI string for GUIs
+                        client->response(*this,
+                            "info depth " + std::to_string(depth) +
+                            " time " + std::to_string(elapsedMs.count()) +
+                            " nodes " + std::to_string(info.nodes) +
+                            " nps " + std::to_string(nps) +
+                            " score cp " + std::to_string(bestScore) +
+                            " pv " + bestMove.toString());
+                    }
+                    else {
+                        std::cerr << "info depth " << depth
+                            << " time " << elapsedMs.count()
+                            << " nodes " << info.nodes
+                            << " nps " << nps
+                            << " score cp " << bestScore
+                            << " pv " << bestMove.toString() << "\n";
+                    }
+                    if (elapsedMs.count() * 2 > timeLimitMs) break;
                 }
             }
         done:
