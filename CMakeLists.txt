@@ -32,3 +32,10 @@ target_compile_features(stockparrot PRIVATE cxx_std_20)
 
 # ── Install ───────────────────────────────────────────────────────────────────
 install(TARGETS stockparrot RUNTIME DESTINATION bin)
+
+install(DIRECTORY include/
+    DESTINATION include
+    FILES_MATCHING
+        PATTERN "*.hpp"
+        PATTERN "*.h"
+)
