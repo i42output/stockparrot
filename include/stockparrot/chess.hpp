@@ -49,7 +49,9 @@ misrepresented as being the original software.
 #include <string>
 #include <vector>
 
- // ─── Types ────────────────────────────────────────────────────────────────────
+namespace stockparrot {
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 using U64 = uint64_t;
 
@@ -1168,3 +1170,5 @@ inline void engineInit() {
 }
 
 inline const std::string START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+}

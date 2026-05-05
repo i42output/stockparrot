@@ -26,6 +26,8 @@ misrepresented as being the original software.
 
 #include <stockparrot/chess.hpp>
 
+using namespace stockparrot;
+
 int main() {
     engineInit();
 
