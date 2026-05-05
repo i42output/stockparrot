@@ -12,3 +12,4 @@ This is my first vibe coding "experiment" - I will find out how much the AIs hav
 * 6 (05/05/26, Claude): Optimise move sorting function.
 * 7 (05/05/26, Claude): Heuristics.
 * 8 (05/05/26, Claude): Structural refactor.
+* 9 (05/05/26, Leigh,Claude): UCI interface.

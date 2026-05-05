@@ -26,30 +26,45 @@ misrepresented as being the original software.
 
 #pragma once
 
+#include <cstdint>
 #include <optional>
+#include <string>
 #include <variant>
 #include <vector>
-#include <string>
 
-namespace uci 
-{
+namespace uci {
+
     struct i_uci;
 
-    struct i_uci_client
-    {
+    struct i_uci_client {
         virtual void response(i_uci& instance, std::string const& value) = 0;
     };
 
-    struct fen : std::string { using std::string::string; };
+    // ── Position ─────────────────────────────────────────────────────────────────
+
+    struct fen : std::string {
+        using std::string::string;
+        explicit fen(std::string s) : std::string(std::move(s)) {}
+    };
     struct startpos {};
     using position = std::variant<fen, startpos>;
-    
+
+    // ── Go parameters ─────────────────────────────────────────────────────────────
+
     struct movetime { std::int32_t value; };
-    using go_param = std::variant<movetime>;
+    struct wtime { std::int32_t value; };
+    struct btime { std::int32_t value; };
+    struct winc { std::int32_t value; };
+    struct binc { std::int32_t value; };
+    struct depth { std::int32_t value; };
+    struct infinite {};
+
+    using go_param = std::variant<movetime, wtime, btime, winc, binc, depth, infinite>;
     using go_params = std::vector<go_param>;
 
-    struct i_uci
-    {
+    // ── Interface ─────────────────────────────────────────────────────────────────
+
+    struct i_uci {
         virtual void connect(i_uci_client& client) = 0;
         virtual void command(std::string const& command) = 0;
         virtual void uci() = 0;

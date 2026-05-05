@@ -42,6 +42,7 @@ misrepresented as being the original software.
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <mutex>
@@ -107,7 +108,7 @@ namespace stockparrot {
     inline U64 popLSB(U64& b) { U64 bit = b & -b; b &= b - 1; return bit; }
     inline int popLSBIdx(U64& b) { int idx = lsb(b); b &= b - 1; return idx; }
 
-    // ─── Attack tables (global, initialised once at startup) ──────────────────────
+    // ─── Attack tables (global, initialised once via std::call_once) ──────────────
 
     inline U64 KNIGHT_ATTACKS[64] = {};
     inline U64 KING_ATTACKS[64] = {};
@@ -854,14 +855,13 @@ namespace stockparrot {
 
     // ─── Engine ───────────────────────────────────────────────────────────────────
     //
-    // Owns the board and transposition table. All search state is encapsulated
-    // here, allowing multiple independent engine instances in the same process.
+    // Owns the board and transposition table. Implements i_uci so it can be driven
+    // directly by any UCI client without going through driver.cpp's raw string parsing.
 
     struct Engine : uci::i_uci {
-        Board   board;
+        Board                board;
         std::vector<TTEntry> tt;
 
-        // Initialise attack tables, Zobrist keys, and set up the start position.
         Engine() : tt(TT_SIZE) {
             static std::once_flag initFlag;
             std::call_once(initFlag, []() {
@@ -870,11 +870,6 @@ namespace stockparrot {
                 initPawnAttacks();
                 initZobrist();
                 });
-            newGame();
-        }
-
-        // Reset to the starting position and clear the TT.
-        void newGame() {
             board.setFromFEN(START_FEN);
             clearTT();
         }
@@ -883,115 +878,186 @@ namespace stockparrot {
             std::fill(tt.begin(), tt.end(), TTEntry{});
         }
 
-        void setPosition(const std::string& fen) {
-            board.setFromFEN(fen);
-        }
-
-        // Apply a move given in UCI notation (e.g. "e2e4"). Returns false if illegal.
-        bool applyMove(const std::string& moveStr) {
-            Move m = parseMove(moveStr);
-            if (m.isNull()) return false;
-            makeMove(board, m);
-            return true;
-        }
-
-        // Run iterative-deepening search and return the best move.
-        Move search(int timeLimitMs, int maxDepth = MAX_DEPTH) {
-            SearchInfo info;
-            info.startTime = std::chrono::steady_clock::now();
-            info.timeLimit = timeLimitMs;
-
-            std::vector<std::pair<int, Move>> rootMoves;
-            Move bestMove;
-            int  bestScore = 0;
-
-            for (int depth = 1; depth <= maxDepth; depth++) {
-                Move ttMove; int score;
-                if (!ttProbe(board.hash, depth, -INF, INF, score, ttMove)) ttMove = bestMove;
-
-                MoveList ml;
-                generateMoves(board, ml);
-                sortMoves(ml, ttMove);
-
-                int alpha = -INF, beta = INF;
-                std::vector<std::pair<int, Move>> current;
-
-                for (int i = 0; i < ml.count; i++) {
-                    Board nb = board;
-                    if (!makeMove(nb, ml.moves[i])) continue;
-                    int s = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
-                    if (info.stop) goto done;
-                    current.push_back({ s, ml.moves[i] });
-                    if (s > alpha) alpha = s;
-                }
-
-                if (!current.empty()) {
-                    rootMoves = current;
-                    bestScore = alpha;
-                    bestMove = std::max_element(rootMoves.begin(), rootMoves.end(),
-                        [](const auto& a, const auto& b) { return a.first < b.first; })->second;
-                }
-
-                {
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - info.startTime).count();
-                    std::cerr << "info depth " << depth
-                        << " score cp " << bestScore
-                        << " nodes " << info.nodes
-                        << " time " << elapsed
-                        << " pv " << bestMove.toString() << "\n";
-                    if (elapsed * 2 > timeLimitMs) break;
-                }
-            }
-        done:
-            // Pick randomly among moves within VARIETY_MARGIN cp of the best
-            std::vector<Move> candidates;
-            for (auto& [s, m] : rootMoves)
-                if (s >= bestScore - VARIETY_MARGIN)
-                    candidates.push_back(m);
-
-            if (candidates.size() > 1) {
-                std::mt19937 rng(std::random_device{}());
-                std::uniform_int_distribution<std::size_t> dist(0, candidates.size() - 1);
-                return candidates[dist(rng)];
-            }
-            return bestMove;
-        }
-
-        // ── UCI access ─────────────────────────────────────────────────────────────
+        // ── i_uci ────────────────────────────────────────────────────────────────
     public:
-        void connect(uci::i_uci_client& client) final {
+        void connect(uci::i_uci_client& aClient) final {
+            client = &aClient;
         }
-        void command(std::string const& command) final {
+
+        // Parse and dispatch a raw UCI command string.
+        void command(std::string const& line) final {
+            std::istringstream ss(line);
+            std::string token;
+            ss >> token;
+
+            if (token == "uci") { uci(); }
+            else if (token == "isready") { isready(); }
+            else if (token == "ucinewgame") { ucinewgame(); }
+            else if (token == "stop") { stop(); }
+            else if (token == "ponderhit") { ponderhit(); }
+            else if (token == "quit") { quit(); }
+            else if (token == "setoption") {
+                // setoption name <name> value <value>
+                std::string nameKw, name, valueKw, value;
+                ss >> nameKw >> name >> valueKw >> value;
+                setoption(name, value);
+            }
+            else if (token == "position") {
+                std::string type;
+                ss >> type;
+                uci::position pos;
+                std::string moves;
+                if (type == "startpos") {
+                    pos = uci::startpos{};
+                    std::string maybe;
+                    ss >> maybe; // consume optional "moves"
+                }
+                else if (type == "fen") {
+                    std::string fen, part;
+                    for (int i = 0; i < 6 && ss >> part; i++) {
+                        if (part == "moves") break;
+                        fen += (i ? " " : "") + part;
+                    }
+                    pos = uci::fen{ static_cast<std::string>(fen) };
+                    if (part != "moves") { std::string tmp; ss >> tmp; } // consume "moves"
+                }
+                std::string tok;
+                while (ss >> tok) {
+                    if (tok == "moves") continue;
+                    moves += (moves.empty() ? "" : " ") + tok;
+                }
+                position(pos, moves);
+            }
+            else if (token == "go") {
+                uci::go_params params;
+                std::string param;
+                while (ss >> param) {
+                    int val;
+                    if (param == "movetime") { ss >> val; params.push_back(uci::movetime{ val }); }
+                    else if (param == "wtime") { ss >> val; params.push_back(uci::wtime{ val }); }
+                    else if (param == "btime") { ss >> val; params.push_back(uci::btime{ val }); }
+                    else if (param == "winc") { ss >> val; params.push_back(uci::winc{ val }); }
+                    else if (param == "binc") { ss >> val; params.push_back(uci::binc{ val }); }
+                    else if (param == "depth") { ss >> val; params.push_back(uci::depth{ val }); }
+                    else if (param == "infinite") { params.push_back(uci::infinite{}); }
+                }
+                go(params);
+            }
         }
+
         void uci() final {
+            respond("id name Stockparrot\n"
+                "id author i42output\n"
+                "option name Hash type spin default 1 min 1 max 4096\n"
+                "uciok");
         }
+
         void quit() final {
+            // Signal handled by driver
         }
+
         void isready() final {
+            respond("readyok");
         }
+
         void ucinewgame() final {
+            board.setFromFEN(START_FEN);
+            clearTT();
         }
+
         void setoption(std::string const& name, std::string const& value) final {
+            if (name == "Hash") {
+                int mb = std::stoi(value);
+                mb = std::max(1, std::min(mb, 4096));
+                std::size_t entries = (static_cast<std::size_t>(mb) * 1024 * 1024) / sizeof(TTEntry);
+                tt.assign(entries, TTEntry{});
+            }
         }
-        void position(uci::position const& position, std::string const& moves) final {
+
+        void position(uci::position const& pos, std::string const& moves) final {
+            if (std::holds_alternative<uci::startpos>(pos)) {
+                board.setFromFEN(START_FEN);
+            }
+            else {
+                board.setFromFEN(std::get<uci::fen>(pos));
+            }
+            std::istringstream ss(moves);
+            std::string tok;
+            while (ss >> tok)
+                applyMove(tok);
         }
-        void go(uci::go_params const& params = {}) final {
+
+        void go(uci::go_params const& params) final {
+            int timeLimit = 3000;
+            int maxDepth = MAX_DEPTH;
+
+            int wtimeVal = -1, btimeVal = -1;
+
+            for (auto const& p : params) {
+                std::visit([&](auto const& v) {
+                    using T = std::decay_t<decltype(v)>;
+                    if constexpr (std::is_same_v<T, uci::movetime>) timeLimit = v.value;
+                    else if constexpr (std::is_same_v<T, uci::wtime>)    wtimeVal = v.value;
+                    else if constexpr (std::is_same_v<T, uci::btime>)    btimeVal = v.value;
+                    else if constexpr (std::is_same_v<T, uci::depth>)    maxDepth = v.value;
+                    else if constexpr (std::is_same_v<T, uci::infinite>) timeLimit = 1 << 30;
+                    }, p);
+            }
+
+            // Apply time management only if movetime wasn't set explicitly
+            bool hasMovetime = std::any_of(params.begin(), params.end(),
+                [](auto const& p) { return std::holds_alternative<uci::movetime>(p); });
+            if (!hasMovetime) {
+                if (board.sideToMove == WHITE && wtimeVal > 0)
+                    timeLimit = std::max(100, wtimeVal / 30);
+                else if (board.sideToMove == BLACK && btimeVal > 0)
+                    timeLimit = std::max(100, btimeVal / 30);
+            }
+
+            Move best = searchBestMove(timeLimit, maxDepth);
+            respond("bestmove " + best.toString());
         }
+
         void stop() final {
+            // Future: signal search thread to stop
         }
+
         void ponderhit() final {
+            // Future: switch from pondering to thinking on the opponent's move
         }
 
     private:
+        uci::i_uci_client* client = nullptr;
+
+        void respond(std::string const& msg) {
+            if (client) client->response(*this, msg);
+        }
+
+        // ── Move parsing ──────────────────────────────────────────────────────────
+
+        bool applyMove(const std::string& moveStr) {
+            MoveList ml;
+            generateMoves(board, ml);
+            for (int i = 0; i < ml.count; i++) {
+                if (ml.moves[i].toString() == moveStr) {
+                    Board nb = board;
+                    if (makeMove(nb, ml.moves[i])) {
+                        board = nb;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
         // ── TT access ─────────────────────────────────────────────────────────────
 
         void ttStore(U64 hash, int depth, int score, TTFlag flag, Move best) {
-            tt[hash % TT_SIZE] = { hash, depth, score, flag, best };
+            tt[hash % tt.size()] = { hash, depth, score, flag, best };
         }
 
         bool ttProbe(U64 hash, int depth, int alpha, int beta, int& score, Move& bestMove) {
-            TTEntry& e = tt[hash % TT_SIZE];
+            TTEntry& e = tt[hash % tt.size()];
             if (e.hash != hash) return false;
             bestMove = e.bestMove;
             if (e.depth >= depth) {
@@ -1069,18 +1135,69 @@ namespace stockparrot {
             return alpha;
         }
 
-        // ── Move parsing ──────────────────────────────────────────────────────────
+        Move searchBestMove(int timeLimitMs, int maxDepth) {
+            SearchInfo info;
+            info.startTime = std::chrono::steady_clock::now();
+            info.timeLimit = timeLimitMs;
 
-        Move parseMove(const std::string& moveStr) const {
-            MoveList ml;
-            generateMoves(board, ml);
-            for (int i = 0; i < ml.count; i++) {
-                if (ml.moves[i].toString() == moveStr) {
+            std::vector<std::pair<int, Move>> rootMoves;
+            Move bestMove;
+            int  bestScore = 0;
+
+            for (int depth = 1; depth <= maxDepth; depth++) {
+                Move ttMove; int score;
+                if (!ttProbe(board.hash, depth, -INF, INF, score, ttMove)) ttMove = bestMove;
+
+                MoveList ml;
+                generateMoves(board, ml);
+                sortMoves(ml, ttMove);
+
+                int alpha = -INF, beta = INF;
+                std::vector<std::pair<int, Move>> current;
+
+                for (int i = 0; i < ml.count; i++) {
                     Board nb = board;
-                    if (makeMove(nb, ml.moves[i])) return ml.moves[i];
+                    if (!makeMove(nb, ml.moves[i])) continue;
+                    int s = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
+                    if (info.stop) goto done;
+                    current.push_back({ s, ml.moves[i] });
+                    if (s > alpha) alpha = s;
+                }
+
+                if (!current.empty()) {
+                    rootMoves = current;
+                    bestScore = alpha;
+                    bestMove = std::max_element(rootMoves.begin(), rootMoves.end(),
+                        [](const auto& a, const auto& b) { return a.first < b.first; })->second;
+                }
+
+                {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - info.startTime).count();
+                    // Send info line via client if connected, else stderr
+                    std::string infoLine =
+                        "info depth " + std::to_string(depth) +
+                        " score cp " + std::to_string(bestScore) +
+                        " nodes " + std::to_string(info.nodes) +
+                        " time " + std::to_string(elapsed) +
+                        " pv " + bestMove.toString();
+                    if (client) client->response(*this, infoLine);
+                    else        std::cerr << infoLine << "\n";
+                    if (elapsed * 2 > timeLimitMs) break;
                 }
             }
-            return NULL_MOVE;
+        done:
+            std::vector<Move> candidates;
+            for (auto& [s, m] : rootMoves)
+                if (s >= bestScore - VARIETY_MARGIN)
+                    candidates.push_back(m);
+
+            if (candidates.size() > 1) {
+                std::mt19937 rng(std::random_device{}());
+                std::uniform_int_distribution<std::size_t> dist(0, candidates.size() - 1);
+                return candidates[dist(rng)];
+            }
+            return bestMove;
         }
     };
 

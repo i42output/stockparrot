@@ -26,78 +26,33 @@ misrepresented as being the original software.
 
 #include <stockparrot/chess.hpp>
 
+// ── UCI client: forwards engine responses to stdout ───────────────────────────
+
+struct stdout_client : uci::i_uci_client {
+    void response(uci::i_uci&, std::string const& msg) final {
+        std::cout << msg << "\n";
+        std::cout.flush();
+    }
+};
+
+// ── main ─────────────────────────────────────────────────────────────────────
+
 int main() {
     stockparrot::Engine engine;
+    stdout_client       client;
+    engine.connect(client);
 
+    bool running = true;
     std::string line;
-    while (std::getline(std::cin, line)) {
-        std::istringstream ss(line);
-        std::string token;
-        ss >> token;
-
-        if (token == "uci") {
-            std::cout << "id name Stockparrot\n"
-                << "id author i42output\n"
-                << "uciok\n";
+    while (running && std::getline(std::cin, line)) {
+        if (line == "quit") {
+            engine.command(line);
+            running = false;
         }
-        else if (token == "isready") {
-            std::cout << "readyok\n";
-        }
-        else if (token == "ucinewgame") {
-            engine.newGame();
-        }
-        else if (token == "position") {
-            std::string type;
-            ss >> type;
-            if (type == "startpos") {
-                engine.setPosition(stockparrot::START_FEN);
-            }
-            else if (type == "fen") {
-                std::string fen, part;
-                for (int i = 0; i < 6 && ss >> part; i++) {
-                    if (part == "moves") break;
-                    fen += (i ? " " : "") + part;
-                }
-                engine.setPosition(fen);
-                std::string maybe;
-                if (part != "moves") ss >> maybe;
-            }
-            std::string tok;
-            while (ss >> tok) {
-                if (tok == "moves") continue;
-                engine.applyMove(tok);
-            }
-        }
-        else if (token == "go") {
-            int timeLimit = 3000;
-            std::string param;
-            int wtime = -1, btime = -1, movetime = -1, depth = -1;
-            while (ss >> param) {
-                if (param == "wtime")    ss >> wtime;
-                else if (param == "btime")    ss >> btime;
-                else if (param == "movetime") ss >> movetime;
-                else if (param == "depth")    ss >> depth;
-            }
-            if (movetime > 0) {
-                timeLimit = movetime;
-            }
-            else if (engine.board.sideToMove == stockparrot::WHITE && wtime > 0) {
-                timeLimit = std::max(100, wtime / 30);
-            }
-            else if (engine.board.sideToMove == stockparrot::BLACK && btime > 0) {
-                timeLimit = std::max(100, btime / 30);
-            }
-            const int maxD = (depth > 0) ? depth : stockparrot::MAX_DEPTH;
-            stockparrot::Move best = engine.search(timeLimit, maxD);
-            std::cout << "bestmove " << best.toString() << "\n";
-            std::cout.flush();
-        }
-        else if (token == "quit") {
-            break;
-        }
-        else if (token == "d" || token == "dl") {
+        else if (line == "d" || line == "dl") {
+            // Debug board display — not part of i_uci, handled locally
             const auto& board = engine.board;
-            const bool labels = (token == "dl");
+            const bool labels = (line == "dl");
             if (labels) std::cout << "\n";
             for (int rank = 7; rank >= 0; rank--) {
                 if (labels) std::cout << (rank + 1) << "  ";
@@ -116,8 +71,11 @@ int main() {
             }
             if (labels) std::cout << "\n   a b c d e f g h\n\n";
             std::cout << board.toFEN() << "\n";
+            std::cout.flush();
         }
-        std::cout.flush();
+        else {
+            engine.command(line);
+        }
     }
     return 0;
 }
