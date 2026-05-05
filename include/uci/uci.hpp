@@ -45,7 +45,8 @@ namespace uci {
             std::int64_t /*nodes*/,
             std::int64_t /*nodesPerSecond*/,
             std::int64_t /*bestScore*/,
-            std::string const& /*bestMove*/) {};
+            std::string const& /*bestMove*/) { }
+        virtual void bestmove(std::string const& /*bestMove*/) {}
     };
 
     // ── Position ─────────────────────────────────────────────────────────────────
