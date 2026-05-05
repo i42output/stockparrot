@@ -1115,7 +1115,18 @@ namespace stockparrot {
                 if (!makeMove(nb, ml.moves[i])) continue;
                 legalMoves++;
 
-                int score = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
+                int score;
+                if (legalMoves == 1) {
+                    // Full window search on the first (best-ordered) move
+                    score = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
+                }
+                else {
+                    // Null-window search: assume this move won't beat alpha
+                    score = -alphaBeta(nb, depth - 1, -alpha - 1, -alpha, info);
+                    // If it does beat alpha, re-search with full window
+                    if (score > alpha && score < beta)
+                        score = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
+                }
                 if (info.stop) return 0;
 
                 if (score > alpha) {
@@ -1174,12 +1185,13 @@ namespace stockparrot {
                 {
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - info.startTime).count();
-                    // Send info line via client if connected, else stderr
+                    long long nps = elapsed > 0 ? (info.nodes * 1000LL) / elapsed : 0;
                     std::string infoLine =
                         "info depth " + std::to_string(depth) +
-                        " score cp " + std::to_string(bestScore) +
-                        " nodes " + std::to_string(info.nodes) +
                         " time " + std::to_string(elapsed) +
+                        " nodes " + std::to_string(info.nodes) +
+                        " nps " + std::to_string(nps) +
+                        " score cp " + std::to_string(bestScore) +
                         " pv " + bestMove.toString();
                     if (client) client->response(*this, infoLine);
                     else        std::cerr << infoLine << "\n";
