@@ -31,6 +31,7 @@ misrepresented as being the original software.
 #include <string>
 #include <variant>
 #include <vector>
+#include <chrono>
 
 namespace uci {
 
@@ -38,6 +39,13 @@ namespace uci {
 
     struct i_uci_client {
         virtual void response(i_uci& instance, std::string const& value) = 0;
+        virtual void info(
+            std::int64_t /*depth*/,
+            std::chrono::milliseconds /*time*/,
+            std::int64_t /*nodes*/,
+            std::int64_t /*nodesPerSecond*/,
+            std::int64_t /*bestScore*/,
+            std::string const& /*bestMove*/) {};
     };
 
     // ── Position ─────────────────────────────────────────────────────────────────
