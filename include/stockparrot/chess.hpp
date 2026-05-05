@@ -114,20 +114,76 @@ namespace stockparrot {
     inline U64 KING_ATTACKS[64] = {};
     inline U64 PAWN_ATTACKS[2][64] = {};
 
-    struct Magic {
-        U64  mask;
-        U64  magic;
-        U64* attacks;
-        int  shift;
+    // ─── Magic bitboard attack tables ────────────────────────────────────────────
+    // Well-known magic numbers from Pradyumna Kannan's public domain magic move generator.
+
+    inline constexpr U64 ROOK_MAGICS[64] = {
+        0xa8002c000108020ULL,  0x6c00049b0002001ULL,  0x100200010090040ULL,  0x2480041000800801ULL,
+        0x280028004000800ULL,  0x900410008040022ULL,  0x280020001001080ULL,  0x2880002041000080ULL,
+        0xa000800080400034ULL, 0x4808020004000ULL,    0x2290802004801000ULL, 0x411000d00100020ULL,
+        0x402800800040080ULL,  0xb000401004208ULL,    0x2409000100040200ULL, 0x1002100004082ULL,
+        0x22878001e24000ULL,   0x1090810021004010ULL, 0x801030040200012ULL,  0x500808008001000ULL,
+        0xa08018014000880ULL,  0x8000808004000200ULL, 0x201008080010200ULL,  0x801020000441091ULL,
+        0x800080204005ULL,     0x1040200040100048ULL, 0x120200402082ULL,     0xd14880480100080ULL,
+        0x12040280080080ULL,   0x100040080020080ULL,  0x9020010080800200ULL, 0x813241200148449ULL,
+        0x491604001800080ULL,  0x100401000402001ULL,  0x4820010021001040ULL, 0x400402202000812ULL,
+        0x209009005000802ULL,  0x810800601800400ULL,  0x4301083214000150ULL, 0x204026458e001401ULL,
+        0x40204000808000ULL,   0x8001008040010020ULL, 0x8410820820420010ULL, 0x1003010010002023ULL,
+        0x804040008008080ULL,  0x12000810020004ULL,   0x1000100200040208ULL, 0x430000a044020001ULL,
+        0x280009023410300ULL,  0xe0100040002240ULL,   0x200100401700ULL,     0x2244100408008080ULL,
+        0x8000400801980ULL,    0x2000810040200ULL,    0x8010100228810400ULL, 0x2000009044210200ULL,
+        0x4080008040102101ULL, 0x40002080411d01ULL,   0x2005524060000901ULL, 0x502001008400422ULL,
+        0x489a000810200402ULL, 0x1004400080a13ULL,    0x4000011008020084ULL, 0x26002114058042ULL,
     };
 
-    inline Magic BISHOP_MAGIC[64] = {};
-    inline Magic ROOK_MAGIC[64] = {};
-    inline U64   BISHOP_ATTACK_TABLE[64][512] = {};
-    inline U64   ROOK_ATTACK_TABLE[64][4096] = {};
+    inline constexpr U64 BISHOP_MAGICS[64] = {
+        0x89a1121896040240ULL, 0x2004844802002010ULL, 0x2068080051921000ULL, 0x62880a0220200808ULL,
+        0x4042004000000ULL,    0x100822020200011ULL,  0xc00444222012000aULL, 0x28808801216001ULL,
+        0x400492088408100ULL,  0x201c401040c0084ULL,  0x840800910a0010ULL,   0x82080240060ULL,
+        0x2000840504006000ULL, 0x30010c4108405004ULL, 0x1008005410080802ULL, 0x8144042209100900ULL,
+        0x208081020014400ULL,  0x4800201208ca00ULL,   0xf18140408012008ULL,  0x1004002802102001ULL,
+        0x841000820080811ULL,  0x40200200a42008ULL,   0x800054042000ULL,     0x88010400410c9000ULL,
+        0x520040470104290ULL,  0x1004040051500081ULL, 0x2002081833080021ULL, 0x400c00c010142ULL,
+        0x941408200c002000ULL, 0x658810000806011ULL,  0x188071040440a00ULL,  0x4800404002011c00ULL,
+        0x104442040404200ULL,  0x511080202091021ULL,  0x4022401120400ULL,    0x80c0040400080120ULL,
+        0x8040010040820802ULL, 0x480810700020090ULL,  0x102008e00040242ULL,  0x809005202050100ULL,
+        0x8002024220104080ULL, 0x431008804142000ULL,  0x19001802081400ULL,   0x200014208040080ULL,
+        0x3308082008200100ULL, 0x41010500040c020ULL,  0x4012020c04210308ULL, 0x208220a202004080ULL,
+        0x111040120082000ULL,  0x6803040141280a00ULL, 0x2101004202410000ULL, 0x8200000041108022ULL,
+        0x21082088000ULL,      0x2410204010040ULL,    0x40100400809000ULL,   0x822088220820214ULL,
+        0x40808090012004ULL,   0x910224040218c9ULL,   0x402814422015008ULL,  0x90014004842410ULL,
+        0x1000042304105ULL,    0x10008830412a00ULL,   0x2520081090008908ULL, 0x40102000a0a60140ULL,
+    };
 
-    // ─── Slider attacks (classical ray-tracing) ───────────────────────────────────
+    inline constexpr int ROOK_SHIFTS[64] = {
+        52,53,53,53,53,53,53,52,
+        53,54,54,54,54,54,54,53,
+        53,54,54,54,54,54,54,53,
+        53,54,54,54,54,54,54,53,
+        53,54,54,54,54,54,54,53,
+        53,54,54,54,54,54,54,53,
+        53,54,54,54,54,54,54,53,
+        52,53,53,53,53,53,53,52,
+    };
 
+    inline constexpr int BISHOP_SHIFTS[64] = {
+        58,59,59,59,59,59,59,58,
+        59,59,59,59,59,59,59,59,
+        59,59,57,57,57,57,59,59,
+        59,59,57,55,55,57,59,59,
+        59,59,57,55,55,57,59,59,
+        59,59,57,57,57,57,59,59,
+        59,59,59,59,59,59,59,59,
+        58,59,59,59,59,59,59,58,
+    };
+
+    // Attack tables sized per square (max 4096 rook, 512 bishop)
+    inline U64 ROOK_ATTACK_TABLE[64][4096] = {};
+    inline U64 BISHOP_ATTACK_TABLE[64][512] = {};
+    inline U64 ROOK_MASKS[64] = {};
+    inline U64 BISHOP_MASKS[64] = {};
+
+    // Classical slider (used only during initialisation)
     inline U64 slideAttacks(int sq, U64 occ, int dx, int dy) {
         U64 attacks = 0;
         int x = sq % 8, y = sq / 8;
@@ -142,6 +198,26 @@ namespace stockparrot {
         return attacks;
     }
 
+    inline U64 rookMaskFor(int sq) {
+        U64 mask = 0;
+        int r = sq / 8, f = sq % 8;
+        for (int i = r + 1; i < 7; i++) mask |= setBit(i * 8 + f);
+        for (int i = r - 1; i > 0; i--) mask |= setBit(i * 8 + f);
+        for (int i = f + 1; i < 7; i++) mask |= setBit(r * 8 + i);
+        for (int i = f - 1; i > 0; i--) mask |= setBit(r * 8 + i);
+        return mask;
+    }
+
+    inline U64 bishopMaskFor(int sq) {
+        U64 mask = 0;
+        int r = sq / 8, f = sq % 8;
+        for (int i = 1; r + i < 7 && f + i < 7; i++) mask |= setBit((r + i) * 8 + (f + i));
+        for (int i = 1; r + i < 7 && f - i > 0; i++) mask |= setBit((r + i) * 8 + (f - i));
+        for (int i = 1; r - i > 0 && f + i < 7; i++) mask |= setBit((r - i) * 8 + (f + i));
+        for (int i = 1; r - i > 0 && f - i > 0; i++) mask |= setBit((r - i) * 8 + (f - i));
+        return mask;
+    }
+
     inline U64 getBishopAttacks(int sq, U64 occ) {
         return slideAttacks(sq, occ, 1, 1) | slideAttacks(sq, occ, -1, 1)
             | slideAttacks(sq, occ, 1, -1) | slideAttacks(sq, occ, -1, -1);
@@ -152,9 +228,20 @@ namespace stockparrot {
             | slideAttacks(sq, occ, 0, 1) | slideAttacks(sq, occ, 0, -1);
     }
 
-    inline U64 bishopAttacks(int sq, U64 occ) { return getBishopAttacks(sq, occ); }
-    inline U64 rookAttacks(int sq, U64 occ) { return getRookAttacks(sq, occ); }
-    inline U64 queenAttacks(int sq, U64 occ) { return getBishopAttacks(sq, occ) | getRookAttacks(sq, occ); }
+    // O(1) magic lookups used during search
+    inline U64 bishopAttacks(int sq, U64 occ) {
+        occ &= BISHOP_MASKS[sq];
+        return BISHOP_ATTACK_TABLE[sq][(occ * BISHOP_MAGICS[sq]) >> BISHOP_SHIFTS[sq]];
+    }
+
+    inline U64 rookAttacks(int sq, U64 occ) {
+        occ &= ROOK_MASKS[sq];
+        return ROOK_ATTACK_TABLE[sq][(occ * ROOK_MAGICS[sq]) >> ROOK_SHIFTS[sq]];
+    }
+
+    inline U64 queenAttacks(int sq, U64 occ) {
+        return bishopAttacks(sq, occ) | rookAttacks(sq, occ);
+    }
 
     // ─── Attack table initialisation ─────────────────────────────────────────────
 
@@ -198,6 +285,151 @@ namespace stockparrot {
         }
     }
 
+    inline void initMagicAttacks() {
+        for (int sq = 0; sq < 64; sq++) {
+            ROOK_MASKS[sq] = rookMaskFor(sq);
+            BISHOP_MASKS[sq] = bishopMaskFor(sq);
+
+            // Enumerate all subsets of the mask and populate attack tables
+            U64 rMask = ROOK_MASKS[sq];
+            U64 occ = 0;
+            do {
+                int idx = (int)((occ * ROOK_MAGICS[sq]) >> ROOK_SHIFTS[sq]);
+                ROOK_ATTACK_TABLE[sq][idx] = getRookAttacks(sq, occ);
+                occ = (occ - rMask) & rMask;
+            } while (occ);
+
+            U64 bMask = BISHOP_MASKS[sq];
+            occ = 0;
+            do {
+                int idx = (int)((occ * BISHOP_MAGICS[sq]) >> BISHOP_SHIFTS[sq]);
+                BISHOP_ATTACK_TABLE[sq][idx] = getBishopAttacks(sq, occ);
+                occ = (occ - bMask) & bMask;
+            } while (occ);
+        }
+    }
+
+    // ─── Evaluation ───────────────────────────────────────────────────────────────
+
+    inline constexpr int PIECE_VALUES[6] = { 100, 320, 330, 500, 900, 20000 };
+    inline constexpr int PHASE_WEIGHTS[6] = { 0, 1, 1, 2, 4, 0 };
+    inline constexpr int TOTAL_PHASE = 24;
+
+    inline constexpr int PST_MG[6][64] = {
+        // PAWN
+        {  0,  0,  0,  0,  0,  0,  0,  0,
+          50, 50, 50, 50, 50, 50, 50, 50,
+          10, 10, 20, 30, 30, 20, 10, 10,
+           5,  5, 10, 25, 25, 10,  5,  5,
+           0,  0,  0, 20, 20,  0,  0,  0,
+           5, -5,-10,  0,  0,-10, -5,  5,
+           5, 10, 10,-20,-20, 10, 10,  5,
+           0,  0,  0,  0,  0,  0,  0,  0 },
+           // KNIGHT
+           { -50,-40,-30,-30,-30,-30,-40,-50,
+             -40,-20,  0,  0,  0,  0,-20,-40,
+             -30,  0, 10, 15, 15, 10,  0,-30,
+             -30,  5, 15, 20, 20, 15,  5,-30,
+             -30,  0, 15, 20, 20, 15,  0,-30,
+             -30,  5, 10, 15, 15, 10,  5,-30,
+             -40,-20,  0,  5,  5,  0,-20,-40,
+             -50,-40,-30,-30,-30,-30,-40,-50 },
+             // BISHOP
+             { -20,-10,-10,-10,-10,-10,-10,-20,
+               -10,  0,  0,  0,  0,  0,  0,-10,
+               -10,  0,  5, 10, 10,  5,  0,-10,
+               -10,  5,  5, 10, 10,  5,  5,-10,
+               -10,  0, 10, 10, 10, 10,  0,-10,
+               -10, 10, 10, 10, 10, 10, 10,-10,
+               -10,  5,  0,  0,  0,  0,  5,-10,
+               -20,-10,-10,-10,-10,-10,-10,-20 },
+               // ROOK
+               {  0,  0,  0,  0,  0,  0,  0,  0,
+                  5, 10, 10, 10, 10, 10, 10,  5,
+                 -5,  0,  0,  0,  0,  0,  0, -5,
+                 -5,  0,  0,  0,  0,  0,  0, -5,
+                 -5,  0,  0,  0,  0,  0,  0, -5,
+                 -5,  0,  0,  0,  0,  0,  0, -5,
+                 -5,  0,  0,  0,  0,  0,  0, -5,
+                  0,  0,  0,  5,  5,  0,  0,  0 },
+                  // QUEEN
+                  { -20,-10,-10, -5, -5,-10,-10,-20,
+                    -10,  0,  0,  0,  0,  0,  0,-10,
+                    -10,  0,  5,  5,  5,  5,  0,-10,
+                     -5,  0,  5,  5,  5,  5,  0, -5,
+                      0,  0,  5,  5,  5,  5,  0, -5,
+                    -10,  5,  5,  5,  5,  5,  0,-10,
+                    -10,  0,  5,  0,  0,  0,  0,-10,
+                    -20,-10,-10, -5, -5,-10,-10,-20 },
+                    // KING middlegame
+                    { -30,-40,-40,-50,-50,-40,-40,-30,
+                      -30,-40,-40,-50,-50,-40,-40,-30,
+                      -30,-40,-40,-50,-50,-40,-40,-30,
+                      -30,-40,-40,-50,-50,-40,-40,-30,
+                      -20,-30,-30,-40,-40,-30,-30,-20,
+                      -10,-20,-20,-20,-20,-20,-20,-10,
+                       20, 20,  0,  0,  0,  0, 20, 20,
+                       20, 30, 10,  0,  0, 10, 30, 20 }
+    };
+
+    inline constexpr int PST_EG[6][64] = {
+        // PAWN
+        {  0,  0,  0,  0,  0,  0,  0,  0,
+          80, 80, 80, 80, 80, 80, 80, 80,
+          50, 50, 50, 50, 50, 50, 50, 50,
+          30, 30, 30, 30, 30, 30, 30, 30,
+          20, 20, 20, 20, 20, 20, 20, 20,
+          10, 10, 10, 10, 10, 10, 10, 10,
+          10, 10, 10, 10, 10, 10, 10, 10,
+           0,  0,  0,  0,  0,  0,  0,  0 },
+           // KNIGHT
+           { -50,-40,-30,-30,-30,-30,-40,-50,
+             -40,-20,  0,  0,  0,  0,-20,-40,
+             -30,  0, 10, 15, 15, 10,  0,-30,
+             -30,  5, 15, 20, 20, 15,  5,-30,
+             -30,  0, 15, 20, 20, 15,  0,-30,
+             -30,  5, 10, 15, 15, 10,  5,-30,
+             -40,-20,  0,  5,  5,  0,-20,-40,
+             -50,-40,-30,-30,-30,-30,-40,-50 },
+             // BISHOP
+             { -20,-10,-10,-10,-10,-10,-10,-20,
+               -10,  0,  0,  0,  0,  0,  0,-10,
+               -10,  0,  5, 10, 10,  5,  0,-10,
+               -10,  5,  5, 10, 10,  5,  5,-10,
+               -10,  0, 10, 10, 10, 10,  0,-10,
+               -10, 10, 10, 10, 10, 10, 10,-10,
+               -10,  5,  0,  0,  0,  0,  5,-10,
+               -20,-10,-10,-10,-10,-10,-10,-20 },
+               // ROOK
+               {  0,  0,  0,  0,  0,  0,  0,  0,
+                  5, 10, 10, 10, 10, 10, 10,  5,
+                 -5,  0,  0,  0,  0,  0,  0, -5,
+                 -5,  0,  0,  0,  0,  0,  0, -5,
+                 -5,  0,  0,  0,  0,  0,  0, -5,
+                 -5,  0,  0,  0,  0,  0,  0, -5,
+                 -5,  0,  0,  0,  0,  0,  0, -5,
+                  0,  0,  0,  5,  5,  0,  0,  0 },
+                  // QUEEN
+                  { -20,-10,-10, -5, -5,-10,-10,-20,
+                    -10,  0,  0,  0,  0,  0,  0,-10,
+                    -10,  0,  5,  5,  5,  5,  0,-10,
+                     -5,  0,  5,  5,  5,  5,  0, -5,
+                      0,  0,  5,  5,  5,  5,  0, -5,
+                    -10,  5,  5,  5,  5,  5,  0,-10,
+                    -10,  0,  5,  0,  0,  0,  0,-10,
+                    -20,-10,-10, -5, -5,-10,-10,-20 },
+                    // KING endgame
+                    { -50,-40,-30,-20,-20,-30,-40,-50,
+                      -30,-20,-10,  0,  0,-10,-20,-30,
+                      -30,-10, 20, 30, 30, 20,-10,-30,
+                      -30,-10, 30, 40, 40, 30,-10,-30,
+                      -30,-10, 30, 40, 40, 30,-10,-30,
+                      -30,-10, 20, 30, 30, 20,-10,-30,
+                      -30,-30,  0,  0,  0,  0,-30,-30,
+                      -50,-30,-30,-30,-30,-30,-30,-50 }
+    };
+
+    inline int mirrorSquare(int sq) { return (7 - sq / 8) * 8 + sq % 8; }
     // ─── Move ─────────────────────────────────────────────────────────────────────
 
     struct Move {
@@ -242,6 +474,11 @@ namespace stockparrot {
         int fullMoveNumber = 1;
         U64 hash = 0;
 
+        // Incrementally maintained material + PST scores (white minus black)
+        int mgScore = 0;
+        int egScore = 0;
+        int phase = 0;
+
         void clear() {
             std::memset(pieces, 0, sizeof(pieces));
             std::memset(occupied, 0, sizeof(occupied));
@@ -253,6 +490,9 @@ namespace stockparrot {
             halfMoveClock = 0;
             fullMoveNumber = 1;
             hash = 0;
+            mgScore = 0;
+            egScore = 0;
+            phase = 0;
         }
 
         void putPiece(int color, int piece, int sq) {
@@ -261,6 +501,12 @@ namespace stockparrot {
             occupied[BOTH] |= setBit(sq);
             mailbox[sq] = piece;
             mailboxColor[sq] = color;
+            // Update incremental scores
+            const int sign = (color == WHITE) ? 1 : -1;
+            const int pstSq = (color == WHITE) ? sq : mirrorSquare(sq);
+            mgScore += sign * (PIECE_VALUES[piece] + PST_MG[piece][pstSq]);
+            egScore += sign * (PIECE_VALUES[piece] + PST_EG[piece][pstSq]);
+            phase += PHASE_WEIGHTS[piece];
         }
 
         void removePiece(int color, int piece, int sq) {
@@ -269,6 +515,12 @@ namespace stockparrot {
             occupied[BOTH] &= ~setBit(sq);
             mailbox[sq] = NO_PIECE;
             mailboxColor[sq] = BOTH;
+            // Update incremental scores
+            const int sign = (color == WHITE) ? 1 : -1;
+            const int pstSq = (color == WHITE) ? sq : mirrorSquare(sq);
+            mgScore -= sign * (PIECE_VALUES[piece] + PST_MG[piece][pstSq]);
+            egScore -= sign * (PIECE_VALUES[piece] + PST_EG[piece][pstSq]);
+            phase -= PHASE_WEIGHTS[piece];
         }
 
         void movePiece(int color, int piece, int from, int to) {
@@ -509,10 +761,34 @@ namespace stockparrot {
         if (!capturesOnly) generateCastlingMoves(b, ml);
     }
 
-    // ─── Make move ────────────────────────────────────────────────────────────────
+    // ─── Make / unmake move ───────────────────────────────────────────────────────
 
-    inline bool makeMove(Board& b, const Move& m) {
+    struct UndoInfo {
+        U64 hash;
+        int castleRights;
+        int epSquare;
+        int halfMoveClock;
+        int capturedPiece;
+        int capturedSq;
+        int mgScore;
+        int egScore;
+        int phase;
+    };
+
+    // Returns false if the move leaves the moving side's king in check (illegal).
+    inline bool makeMove(Board& b, const Move& m, UndoInfo& undo) {
         const int us = b.sideToMove, them = 1 - us;
+
+        // Save state for unmake
+        undo.hash = b.hash;
+        undo.castleRights = b.castleRights;
+        undo.epSquare = b.epSquare;
+        undo.halfMoveClock = b.halfMoveClock;
+        undo.capturedPiece = m.captured;
+        undo.capturedSq = m.to;
+        undo.mgScore = b.mgScore;
+        undo.egScore = b.egScore;
+        undo.phase = b.phase;
 
         if (m.captured != NO_PIECE && !m.ep) {
             b.removePiece(them, m.captured, m.to);
@@ -520,6 +796,7 @@ namespace stockparrot {
         }
         if (m.ep) {
             int capSq = m.to + (us == WHITE ? -8 : 8);
+            undo.capturedSq = capSq;
             b.removePiece(them, PAWN, capSq);
             b.hash ^= ZOBRIST_PIECE[them][PAWN][capSq];
         }
@@ -568,177 +845,103 @@ namespace stockparrot {
         return (ks != NO_SQ) && !b.isAttacked(ks, them);
     }
 
-    // ─── Evaluation ───────────────────────────────────────────────────────────────
+    inline void unmakeMove(Board& b, const Move& m, const UndoInfo& undo) {
+        const int us = 1 - b.sideToMove;  // side that made the move
+        const int them = b.sideToMove;
 
-    inline constexpr int PIECE_VALUES[6] = { 100, 320, 330, 500, 900, 20000 };
-    inline constexpr int PHASE_WEIGHTS[6] = { 0, 1, 1, 2, 4, 0 };
-    inline constexpr int TOTAL_PHASE = 24;
+        // Restore scalar state directly from undo
+        b.hash = undo.hash;
+        b.castleRights = undo.castleRights;
+        b.epSquare = undo.epSquare;
+        b.halfMoveClock = undo.halfMoveClock;
+        b.mgScore = undo.mgScore;
+        b.egScore = undo.egScore;
+        b.phase = undo.phase;
+        b.sideToMove = us;
+        if (us == BLACK) b.fullMoveNumber--;
 
-    inline constexpr int PST_MG[6][64] = {
-        // PAWN
-        {  0,  0,  0,  0,  0,  0,  0,  0,
-          50, 50, 50, 50, 50, 50, 50, 50,
-          10, 10, 20, 30, 30, 20, 10, 10,
-           5,  5, 10, 25, 25, 10,  5,  5,
-           0,  0,  0, 20, 20,  0,  0,  0,
-           5, -5,-10,  0,  0,-10, -5,  5,
-           5, 10, 10,-20,-20, 10, 10,  5,
-           0,  0,  0,  0,  0,  0,  0,  0 },
-           // KNIGHT
-           { -50,-40,-30,-30,-30,-30,-40,-50,
-             -40,-20,  0,  0,  0,  0,-20,-40,
-             -30,  0, 10, 15, 15, 10,  0,-30,
-             -30,  5, 15, 20, 20, 15,  5,-30,
-             -30,  0, 15, 20, 20, 15,  0,-30,
-             -30,  5, 10, 15, 15, 10,  5,-30,
-             -40,-20,  0,  5,  5,  0,-20,-40,
-             -50,-40,-30,-30,-30,-30,-40,-50 },
-             // BISHOP
-             { -20,-10,-10,-10,-10,-10,-10,-20,
-               -10,  0,  0,  0,  0,  0,  0,-10,
-               -10,  0,  5, 10, 10,  5,  0,-10,
-               -10,  5,  5, 10, 10,  5,  5,-10,
-               -10,  0, 10, 10, 10, 10,  0,-10,
-               -10, 10, 10, 10, 10, 10, 10,-10,
-               -10,  5,  0,  0,  0,  0,  5,-10,
-               -20,-10,-10,-10,-10,-10,-10,-20 },
-               // ROOK
-               {  0,  0,  0,  0,  0,  0,  0,  0,
-                  5, 10, 10, 10, 10, 10, 10,  5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                  0,  0,  0,  5,  5,  0,  0,  0 },
-                  // QUEEN
-                  { -20,-10,-10, -5, -5,-10,-10,-20,
-                    -10,  0,  0,  0,  0,  0,  0,-10,
-                    -10,  0,  5,  5,  5,  5,  0,-10,
-                     -5,  0,  5,  5,  5,  5,  0, -5,
-                      0,  0,  5,  5,  5,  5,  0, -5,
-                    -10,  5,  5,  5,  5,  5,  0,-10,
-                    -10,  0,  5,  0,  0,  0,  0,-10,
-                    -20,-10,-10, -5, -5,-10,-10,-20 },
-                    // KING middlegame
-                    { -30,-40,-40,-50,-50,-40,-40,-30,
-                      -30,-40,-40,-50,-50,-40,-40,-30,
-                      -30,-40,-40,-50,-50,-40,-40,-30,
-                      -30,-40,-40,-50,-50,-40,-40,-30,
-                      -20,-30,-30,-40,-40,-30,-30,-20,
-                      -10,-20,-20,-20,-20,-20,-20,-10,
-                       20, 20,  0,  0,  0,  0, 20, 20,
-                       20, 30, 10,  0,  0, 10, 30, 20 }
-    };
+        // Undo promotion: replace promoted piece with pawn
+        if (m.promo != NO_PIECE) {
+            b.removePiece(us, m.promo, m.to);
+            b.putPiece(us, PAWN, m.to);
+        }
 
-    inline constexpr int PST_EG[6][64] = {
-        // PAWN
-        {  0,  0,  0,  0,  0,  0,  0,  0,
-          80, 80, 80, 80, 80, 80, 80, 80,
-          50, 50, 50, 50, 50, 50, 50, 50,
-          30, 30, 30, 30, 30, 30, 30, 30,
-          20, 20, 20, 20, 20, 20, 20, 20,
-          10, 10, 10, 10, 10, 10, 10, 10,
-          10, 10, 10, 10, 10, 10, 10, 10,
-           0,  0,  0,  0,  0,  0,  0,  0 },
-           // KNIGHT
-           { -50,-40,-30,-30,-30,-30,-40,-50,
-             -40,-20,  0,  0,  0,  0,-20,-40,
-             -30,  0, 10, 15, 15, 10,  0,-30,
-             -30,  5, 15, 20, 20, 15,  5,-30,
-             -30,  0, 15, 20, 20, 15,  0,-30,
-             -30,  5, 10, 15, 15, 10,  5,-30,
-             -40,-20,  0,  5,  5,  0,-20,-40,
-             -50,-40,-30,-30,-30,-30,-40,-50 },
-             // BISHOP
-             { -20,-10,-10,-10,-10,-10,-10,-20,
-               -10,  0,  0,  0,  0,  0,  0,-10,
-               -10,  0,  5, 10, 10,  5,  0,-10,
-               -10,  5,  5, 10, 10,  5,  5,-10,
-               -10,  0, 10, 10, 10, 10,  0,-10,
-               -10, 10, 10, 10, 10, 10, 10,-10,
-               -10,  5,  0,  0,  0,  0,  5,-10,
-               -20,-10,-10,-10,-10,-10,-10,-20 },
-               // ROOK
-               {  0,  0,  0,  0,  0,  0,  0,  0,
-                  5, 10, 10, 10, 10, 10, 10,  5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                  0,  0,  0,  5,  5,  0,  0,  0 },
-                  // QUEEN
-                  { -20,-10,-10, -5, -5,-10,-10,-20,
-                    -10,  0,  0,  0,  0,  0,  0,-10,
-                    -10,  0,  5,  5,  5,  5,  0,-10,
-                     -5,  0,  5,  5,  5,  5,  0, -5,
-                      0,  0,  5,  5,  5,  5,  0, -5,
-                    -10,  5,  5,  5,  5,  5,  0,-10,
-                    -10,  0,  5,  0,  0,  0,  0,-10,
-                    -20,-10,-10, -5, -5,-10,-10,-20 },
-                    // KING endgame
-                    { -50,-40,-30,-20,-20,-30,-40,-50,
-                      -30,-20,-10,  0,  0,-10,-20,-30,
-                      -30,-10, 20, 30, 30, 20,-10,-30,
-                      -30,-10, 30, 40, 40, 30,-10,-30,
-                      -30,-10, 30, 40, 40, 30,-10,-30,
-                      -30,-10, 20, 30, 30, 20,-10,-30,
-                      -30,-30,  0,  0,  0,  0,-30,-30,
-                      -50,-30,-30,-30,-30,-30,-30,-50 }
-    };
+        // Move piece back
+        b.movePiece(us, m.piece, m.to, m.from);
 
-    inline int mirrorSquare(int sq) { return (7 - sq / 8) * 8 + sq % 8; }
+        // Restore captured piece
+        if (m.captured != NO_PIECE)
+            b.putPiece(them, m.captured, undo.capturedSq);
+
+        // Undo castling: move rook back
+        if (m.castle) {
+            if (m.to == G1) b.movePiece(WHITE, ROOK, F1, H1);
+            if (m.to == C1) b.movePiece(WHITE, ROOK, D1, A1);
+            if (m.to == G8) b.movePiece(BLACK, ROOK, F8, H8);
+            if (m.to == C8) b.movePiece(BLACK, ROOK, D8, A8);
+        }
+    }
+
+    // Convenience overload for the old copy-based call sites (applyMove in driver)
+    inline bool makeMove(Board& b, const Move& m) {
+        UndoInfo undo;
+        return makeMove(b, m, undo);
+    }
+
 
     inline constexpr int PASSED_PAWN_BONUS[8] = { 0, 10, 20, 35, 55, 80, 120, 0 };
 
     inline U64 fileMask(int file) { return 0x0101010101010101ULL << file; }
 
-    inline U64 adjacentFiles(int file) {
-        U64 mask = 0;
-        if (file > 0) mask |= fileMask(file - 1);
-        if (file < 7) mask |= fileMask(file + 1);
-        return mask;
-    }
+    // ─── Precomputed pawn evaluation masks ───────────────────────────────────────
+    // Populated by initPawnMasks() — avoids per-node looping in evaluate().
 
-    inline U64 frontSpan(int color, int sq) {
-        U64 span = 0;
-        int file = sq % 8, rank = sq / 8;
-        if (color == WHITE) { for (int r = rank + 1; r < 8; r++) span |= setBit(r * 8 + file); }
-        else { for (int r = rank - 1; r >= 0; r--) span |= setBit(r * 8 + file); }
-        return span;
-    }
+    inline U64 FRONT_SPAN[2][64] = {};  // squares ahead of a pawn on same file
+    inline U64 PASSED_PAWN_MASK[2][64] = {};  // squares that must be clear for a passed pawn
+    inline U64 ADJACENT_FILES[8] = {};  // neighbour files for isolated pawn detection
+    inline U64 FILE_MASK[8] = {};  // full file bitboard
 
-    inline U64 passedPawnMask(int color, int sq) {
-        int file = sq % 8, rank = sq / 8;
-        U64 mask = frontSpan(color, sq);
-        for (int df : {-1, 1}) {
-            int f = file + df;
-            if (f < 0 || f > 7) continue;
-            if (color == WHITE) { for (int r = rank + 1; r < 8; r++) mask |= setBit(r * 8 + f); }
-            else { for (int r = rank - 1; r >= 0; r--) mask |= setBit(r * 8 + f); }
+    inline void initPawnMasks() {
+        for (int f = 0; f < 8; f++) {
+            FILE_MASK[f] = fileMask(f);
+            ADJACENT_FILES[f] = 0;
+            if (f > 0) ADJACENT_FILES[f] |= FILE_MASK[f - 1];
+            if (f < 7) ADJACENT_FILES[f] |= FILE_MASK[f + 1];
         }
-        return mask;
+        for (int sq = 0; sq < 64; sq++) {
+            int file = sq % 8, rank = sq / 8;
+            // White front span: all squares above on same file
+            U64 wSpan = 0;
+            for (int r = rank + 1; r < 8; r++) wSpan |= setBit(r * 8 + file);
+            FRONT_SPAN[WHITE][sq] = wSpan;
+            // Black front span: all squares below on same file
+            U64 bSpan = 0;
+            for (int r = rank - 1; r >= 0; r--) bSpan |= setBit(r * 8 + file);
+            FRONT_SPAN[BLACK][sq] = bSpan;
+            // Passed pawn mask = front span + same span on adjacent files
+            for (int color : {WHITE, BLACK}) {
+                U64 mask = FRONT_SPAN[color][sq];
+                for (int df : {-1, 1}) {
+                    int f = file + df;
+                    if (f < 0 || f > 7) continue;
+                    if (color == WHITE) {
+                        for (int r = rank + 1; r < 8; r++) mask |= setBit(r * 8 + f);
+                    }
+                    else {
+                        for (int r = rank - 1; r >= 0; r--) mask |= setBit(r * 8 + f);
+                    }
+                }
+                PASSED_PAWN_MASK[color][sq] = mask;
+            }
+        }
     }
 
     inline int evaluate(const Board& b) {
-        int mgScore = 0, egScore = 0, phase = 0;
-
-        for (int color = 0; color < 2; color++) {
-            const int sign = (color == WHITE) ? 1 : -1;
-            for (int piece = 0; piece < 6; piece++) {
-                U64 bb = b.pieces[color][piece];
-                phase += popcount(bb) * PHASE_WEIGHTS[piece];
-                while (bb) {
-                    int sq = popLSBIdx(bb);
-                    int pstSq = (color == WHITE) ? sq : mirrorSquare(sq);
-                    mgScore += sign * (PIECE_VALUES[piece] + PST_MG[piece][pstSq]);
-                    egScore += sign * (PIECE_VALUES[piece] + PST_EG[piece][pstSq]);
-                }
-            }
-        }
-
-        phase = std::min(phase, TOTAL_PHASE);
+        // Material + PST is maintained incrementally in b.mgScore / b.egScore / b.phase.
+        // Here we add the positional terms that depend on piece interactions.
+        int mgScore = b.mgScore;
+        int egScore = b.egScore;
+        int phase = std::min(b.phase, TOTAL_PHASE);
 
         for (int color = 0; color < 2; color++) {
             const int sign = (color == WHITE) ? 1 : -1;
@@ -751,9 +954,9 @@ namespace stockparrot {
                 int sq = popLSBIdx(pawns);
                 int file = sq % 8, rank = sq / 8;
                 int normalRank = (color == WHITE) ? rank : (7 - rank);
-                if (frontSpan(color, sq) & myPawns) { mgScore += sign * -15; egScore += sign * -25; }
-                if (!(adjacentFiles(file) & myPawns)) { mgScore += sign * -15; egScore += sign * -20; }
-                if (!(passedPawnMask(color, sq) & theirPawns)) {
+                if (FRONT_SPAN[color][sq] & myPawns) { mgScore += sign * -15; egScore += sign * -25; }
+                if (!(ADJACENT_FILES[file] & myPawns)) { mgScore += sign * -15; egScore += sign * -20; }
+                if (!(PASSED_PAWN_MASK[color][sq] & theirPawns)) {
                     int bonus = PASSED_PAWN_BONUS[normalRank];
                     mgScore += sign * bonus / 2; egScore += sign * bonus;
                 }
@@ -765,7 +968,7 @@ namespace stockparrot {
             U64 rooks = b.pieces[color][ROOK];
             while (rooks) {
                 int sq = popLSBIdx(rooks), file = sq % 8, rank = sq / 8;
-                U64 fm = fileMask(file);
+                U64 fm = FILE_MASK[file];
                 if (!(fm & (myPawns | theirPawns))) { mgScore += sign * 20; egScore += sign * 15; }
                 else if (!(fm & myPawns)) { mgScore += sign * 10; egScore += sign * 8; }
                 if (rank == rank7) { mgScore += sign * 20; egScore += sign * 30; }
@@ -793,7 +996,7 @@ namespace stockparrot {
                 for (int df = -1; df <= 1; df++) {
                     int f = kfile + df;
                     if (f < 0 || f > 7) continue;
-                    U64 fm = fileMask(f);
+                    U64 fm = FILE_MASK[f];
                     if (!(fm & b.pieces[color][PAWN]))
                         mgScore += sign * (!(fm & b.pieces[them][PAWN]) ? -20 : -10);
                 }
@@ -868,6 +1071,8 @@ namespace stockparrot {
                 initKnightAttacks();
                 initKingAttacks();
                 initPawnAttacks();
+                initMagicAttacks();
+                initPawnMasks();
                 initZobrist();
                 });
             board.setFromFEN(START_FEN);
@@ -1118,13 +1323,10 @@ namespace stockparrot {
 
                 int score;
                 if (legalMoves == 1) {
-                    // Full window search on the first (best-ordered) move
                     score = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
                 }
                 else {
-                    // Null-window search: assume this move won't beat alpha
                     score = -alphaBeta(nb, depth - 1, -alpha - 1, -alpha, info);
-                    // If it does beat alpha, re-search with full window
                     if (score > alpha && score < beta)
                         score = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
                 }
