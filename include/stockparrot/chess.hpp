@@ -50,6 +50,8 @@ misrepresented as being the original software.
 #include <string>
 #include <vector>
 
+#include <uci/uci.hpp>
+
 namespace stockparrot {
 
     // ─── Types ────────────────────────────────────────────────────────────────────
@@ -855,7 +857,7 @@ namespace stockparrot {
     // Owns the board and transposition table. All search state is encapsulated
     // here, allowing multiple independent engine instances in the same process.
 
-    struct Engine {
+    struct Engine : uci::i_uci {
         Board   board;
         std::vector<TTEntry> tt;
 
@@ -954,6 +956,31 @@ namespace stockparrot {
                 return candidates[dist(rng)];
             }
             return bestMove;
+        }
+
+        // ── UCI access ─────────────────────────────────────────────────────────────
+    public:
+        void connect(uci::i_uci_client& client) final {
+        }
+        void command(std::string const& command) final {
+        }
+        void uci() final {
+        }
+        void quit() final {
+        }
+        void isready() final {
+        }
+        void ucinewgame() final {
+        }
+        void setoption(std::string const& name, std::string const& value) final {
+        }
+        void position(uci::position const& position, std::string const& moves) final {
+        }
+        void go(uci::go_params const& params = {}) final {
+        }
+        void stop() final {
+        }
+        void ponderhit() final {
         }
 
     private:

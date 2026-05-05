@@ -22,6 +22,7 @@ endif()
 add_executable(stockparrot
     src/driver.cpp
     include/stockparrot/chess.hpp
+    include/uci/uci.hpp
 )
 
 source_group("Header Files" FILES include/stockparrot/chess.hpp)
