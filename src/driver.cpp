@@ -95,11 +95,12 @@ int main() {
         else if (token == "quit") {
             break;
         }
-        else if (token == "d") {
+        else if (token == "d" || token == "dl") {
             const auto& board = engine.board;
-            std::cout << "\n";
+            const bool labels = (token == "dl");
+            if (labels) std::cout << "\n";
             for (int rank = 7; rank >= 0; rank--) {
-                std::cout << (rank + 1) << "  ";
+                if (labels) std::cout << (rank + 1) << "  ";
                 for (int file = 0; file < 8; file++) {
                     int sq = rank * 8 + file;
                     if (board.mailbox[sq] == stockparrot::NO_PIECE) {
@@ -113,7 +114,7 @@ int main() {
                 }
                 std::cout << "\n";
             }
-            std::cout << "\n   a b c d e f g h\n\n";
+            if (labels) std::cout << "\n   a b c d e f g h\n\n";
             std::cout << board.toFEN() << "\n";
         }
         std::cout.flush();
