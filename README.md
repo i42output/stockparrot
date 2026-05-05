@@ -1,5 +1,7 @@
 # Stockparrot
-Stockparrot - an AI generated C++ chess engine
+Stockparrot - an AI generated C++ chess engine.
+
+This is my first vibe coding "experiment" - I will find out how much the AIs have really evolved from being just stochastic parrots.
 
 # Iterations
 * 1 (05/05/26, Claude): Claude created initial version which had a bug which allowed illegal moves.
