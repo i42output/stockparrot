@@ -39,8 +39,8 @@ int main() {
 
         if (token == "uci") {
             std::cout << "id name Stockparrot\n"
-                      << "id author i42output\n"
-                      << "uciok\n";
+                << "id author i42output\n"
+                << "uciok\n";
         }
         else if (token == "isready") {
             std::cout << "readyok\n";
@@ -54,7 +54,8 @@ int main() {
             ss >> type;
             if (type == "startpos") {
                 board.setFromFEN(START_FEN);
-            } else if (type == "fen") {
+            }
+            else if (type == "fen") {
                 std::string fen, part;
                 for (int i = 0; i < 6 && ss >> part; i++) {
                     if (part == "moves") break;
@@ -76,16 +77,18 @@ int main() {
             std::string param;
             int wtime = -1, btime = -1, movetime = -1, depth = -1;
             while (ss >> param) {
-                if      (param == "wtime")    ss >> wtime;
+                if (param == "wtime")    ss >> wtime;
                 else if (param == "btime")    ss >> btime;
                 else if (param == "movetime") ss >> movetime;
                 else if (param == "depth")    ss >> depth;
             }
             if (movetime > 0) {
                 timeLimit = movetime;
-            } else if (board.sideToMove == WHITE && wtime > 0) {
+            }
+            else if (board.sideToMove == WHITE && wtime > 0) {
                 timeLimit = std::max(100, wtime / 30);
-            } else if (board.sideToMove == BLACK && btime > 0) {
+            }
+            else if (board.sideToMove == BLACK && btime > 0) {
                 timeLimit = std::max(100, btime / 30);
             }
             const int maxD = (depth > 0) ? depth : MAX_DEPTH;
@@ -97,12 +100,15 @@ int main() {
             break;
         }
         else if (token == "d") {
+            std::cout << "\n";
             for (int rank = 7; rank >= 0; rank--) {
+                std::cout << (rank + 1) << "  ";
                 for (int file = 0; file < 8; file++) {
                     int sq = rank * 8 + file;
                     if (board.mailbox[sq] == NO_PIECE) {
                         std::cout << ". ";
-                    } else {
+                    }
+                    else {
                         int p = board.mailbox[sq];
                         int c = board.mailboxColor[sq];
                         std::cout << (char)(c == WHITE ? "PNBRQK"[p] : "pnbrqk"[p]) << " ";
@@ -110,6 +116,7 @@ int main() {
                 }
                 std::cout << "\n";
             }
+            std::cout << "\n   a b c d e f g h\n\n";
             std::cout << board.toFEN() << "\n";
         }
         std::cout.flush();
