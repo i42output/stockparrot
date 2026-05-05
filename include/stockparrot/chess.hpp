@@ -1015,6 +1015,7 @@ namespace stockparrot {
             }
 
             Move best = searchBestMove(timeLimit, maxDepth);
+            if (client) client->bestmove(best.toString());
             respond("bestmove " + best.toString());
         }
 
