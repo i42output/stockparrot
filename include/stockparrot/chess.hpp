@@ -1015,7 +1015,7 @@ namespace stockparrot {
             }
 
             Move best = searchBestMove(timeLimit, maxDepth);
-            if (client) client->bestmove(best.toString());
+            if (client) client->bestmove(*this, best.toString());
             respond("bestmove " + best.toString());
         }
 
@@ -1191,7 +1191,7 @@ namespace stockparrot {
 
                     if (client) {
                         // Typed callback for structured consumers
-                        client->info(depth, elapsedMs, info.nodes, nps,
+                        client->info(*this, depth, elapsedMs, info.nodes, nps,
                             bestScore, bestMove.toString());
                         // Standard UCI string for GUIs
                         client->response(*this,

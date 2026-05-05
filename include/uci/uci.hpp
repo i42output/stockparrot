@@ -40,13 +40,14 @@ namespace uci {
     struct i_uci_client {
         virtual void response(i_uci& instance, std::string const& value) = 0;
         virtual void info(
+            i_uci& /*instance*/,
             std::int64_t /*depth*/,
             std::chrono::milliseconds /*time*/,
             std::int64_t /*nodes*/,
             std::int64_t /*nodesPerSecond*/,
             std::int64_t /*bestScore*/,
             std::string const& /*bestMove*/) { }
-        virtual void bestmove(std::string const& /*bestMove*/) {}
+        virtual void bestmove(i_uci& /*instance*/, std::string const& /*bestMove*/) {}
     };
 
     // ── Position ─────────────────────────────────────────────────────────────────
