@@ -19,7 +19,12 @@ else()
 endif()
 
 # ── Target ────────────────────────────────────────────────────────────────────
-add_executable(stockparrot src/driver.cpp)
+add_executable(stockparrot
+    src/driver.cpp
+    include/stockparrot/chess.hpp
+)
+
+source_group("Header Files" FILES include/stockparrot/chess.hpp)
 
 target_include_directories(stockparrot PRIVATE include)
 target_compile_features(stockparrot PRIVATE cxx_std_20)
