@@ -542,7 +542,14 @@ inline bool makeMove(Board& b, const Move& m) {
 
 inline constexpr int PIECE_VALUES[6] = { 100, 320, 330, 500, 900, 20000 };
 
-inline constexpr int PST[6][64] = {
+// Tapered eval: each score is a pair (middlegame, endgame) packed into one int.
+// We interpolate between them based on remaining material (game phase).
+// Phase weights per piece (excluding kings and pawns)
+inline constexpr int PHASE_WEIGHTS[6] = { 0, 1, 1, 2, 4, 0 };
+inline constexpr int TOTAL_PHASE = 24; // 4*knights + 4*bishops + 4*rooks + 2*queens
+
+// Middlegame PSTs
+inline constexpr int PST_MG[6][64] = {
     // PAWN
     {  0,  0,  0,  0,  0,  0,  0,  0,
       50, 50, 50, 50, 50, 50, 50, 50,
@@ -588,7 +595,7 @@ inline constexpr int PST[6][64] = {
                 -10,  5,  5,  5,  5,  5,  0,-10,
                 -10,  0,  5,  0,  0,  0,  0,-10,
                 -20,-10,-10, -5, -5,-10,-10,-20 },
-                // KING (middlegame)
+                // KING middlegame - wants to castle and hide
                 { -30,-40,-40,-50,-50,-40,-40,-30,
                   -30,-40,-40,-50,-50,-40,-40,-30,
                   -30,-40,-40,-50,-50,-40,-40,-30,
@@ -599,21 +606,316 @@ inline constexpr int PST[6][64] = {
                    20, 30, 10,  0,  0, 10, 30, 20 }
 };
 
+// Endgame PSTs - king becomes active, pawns matter more
+inline constexpr int PST_EG[6][64] = {
+    // PAWN - advance and promote
+    {  0,  0,  0,  0,  0,  0,  0,  0,
+      80, 80, 80, 80, 80, 80, 80, 80,
+      50, 50, 50, 50, 50, 50, 50, 50,
+      30, 30, 30, 30, 30, 30, 30, 30,
+      20, 20, 20, 20, 20, 20, 20, 20,
+      10, 10, 10, 10, 10, 10, 10, 10,
+      10, 10, 10, 10, 10, 10, 10, 10,
+       0,  0,  0,  0,  0,  0,  0,  0 },
+       // KNIGHT - centralisation still good
+       { -50,-40,-30,-30,-30,-30,-40,-50,
+         -40,-20,  0,  0,  0,  0,-20,-40,
+         -30,  0, 10, 15, 15, 10,  0,-30,
+         -30,  5, 15, 20, 20, 15,  5,-30,
+         -30,  0, 15, 20, 20, 15,  0,-30,
+         -30,  5, 10, 15, 15, 10,  5,-30,
+         -40,-20,  0,  5,  5,  0,-20,-40,
+         -50,-40,-30,-30,-30,-30,-40,-50 },
+         // BISHOP
+         { -20,-10,-10,-10,-10,-10,-10,-20,
+           -10,  0,  0,  0,  0,  0,  0,-10,
+           -10,  0,  5, 10, 10,  5,  0,-10,
+           -10,  5,  5, 10, 10,  5,  5,-10,
+           -10,  0, 10, 10, 10, 10,  0,-10,
+           -10, 10, 10, 10, 10, 10, 10,-10,
+           -10,  5,  0,  0,  0,  0,  5,-10,
+           -20,-10,-10,-10,-10,-10,-10,-20 },
+           // ROOK
+           {  0,  0,  0,  0,  0,  0,  0,  0,
+              5, 10, 10, 10, 10, 10, 10,  5,
+             -5,  0,  0,  0,  0,  0,  0, -5,
+             -5,  0,  0,  0,  0,  0,  0, -5,
+             -5,  0,  0,  0,  0,  0,  0, -5,
+             -5,  0,  0,  0,  0,  0,  0, -5,
+             -5,  0,  0,  0,  0,  0,  0, -5,
+              0,  0,  0,  5,  5,  0,  0,  0 },
+              // QUEEN
+              { -20,-10,-10, -5, -5,-10,-10,-20,
+                -10,  0,  0,  0,  0,  0,  0,-10,
+                -10,  0,  5,  5,  5,  5,  0,-10,
+                 -5,  0,  5,  5,  5,  5,  0, -5,
+                  0,  0,  5,  5,  5,  5,  0, -5,
+                -10,  5,  5,  5,  5,  5,  0,-10,
+                -10,  0,  5,  0,  0,  0,  0,-10,
+                -20,-10,-10, -5, -5,-10,-10,-20 },
+                // KING endgame - centralise and support pawns
+                { -50,-40,-30,-20,-20,-30,-40,-50,
+                  -30,-20,-10,  0,  0,-10,-20,-30,
+                  -30,-10, 20, 30, 30, 20,-10,-30,
+                  -30,-10, 30, 40, 40, 30,-10,-30,
+                  -30,-10, 30, 40, 40, 30,-10,-30,
+                  -30,-10, 20, 30, 30, 20,-10,-30,
+                  -30,-30,  0,  0,  0,  0,-30,-30,
+                  -50,-30,-30,-30,-30,-30,-30,-50 }
+};
+
 inline int mirrorSquare(int sq) { return (7 - sq / 8) * 8 + sq % 8; }
 
+// ── Pawn structure helpers ────────────────────────────────────────────────────
+
+// Precompute file masks
+inline U64 fileMask(int file) {
+    return 0x0101010101010101ULL << file;
+}
+
+inline U64 adjacentFiles(int file) {
+    U64 mask = 0;
+    if (file > 0) mask |= fileMask(file - 1);
+    if (file < 7) mask |= fileMask(file + 1);
+    return mask;
+}
+
+// Squares in front of a pawn (all ranks ahead)
+inline U64 frontSpan(int color, int sq) {
+    U64 span = 0;
+    int file = sq % 8, rank = sq / 8;
+    if (color == WHITE) {
+        for (int r = rank + 1; r < 8; r++) span |= setBit(r * 8 + file);
+    }
+    else {
+        for (int r = rank - 1; r >= 0; r--) span |= setBit(r * 8 + file);
+    }
+    return span;
+}
+
+// All squares on adjacent files ahead — used for passed pawn detection
+inline U64 passedPawnMask(int color, int sq) {
+    int file = sq % 8;
+    U64 front = frontSpan(color, sq);
+    U64 mask = front;
+    if (file > 0) {
+        // adjacent file front span
+        U64 adjFront = 0;
+        int rank = sq / 8;
+        if (color == WHITE) {
+            for (int r = rank + 1; r < 8; r++) adjFront |= setBit(r * 8 + (file - 1));
+        }
+        else {
+            for (int r = rank - 1; r >= 0; r--) adjFront |= setBit(r * 8 + (file - 1));
+        }
+        mask |= adjFront;
+    }
+    if (file < 7) {
+        U64 adjFront = 0;
+        int rank = sq / 8;
+        if (color == WHITE) {
+            for (int r = rank + 1; r < 8; r++) adjFront |= setBit(r * 8 + (file + 1));
+        }
+        else {
+            for (int r = rank - 1; r >= 0; r--) adjFront |= setBit(r * 8 + (file + 1));
+        }
+        mask |= adjFront;
+    }
+    return mask;
+}
+
+// Bonus for passed pawn by rank (from own side) - increases as pawn advances
+inline constexpr int PASSED_PAWN_BONUS[8] = { 0, 10, 20, 35, 55, 80, 120, 0 };
+
+// ── Evaluation ────────────────────────────────────────────────────────────────
+
 inline int evaluate(const Board& b) {
-    int score = 0;
+    int mgScore = 0, egScore = 0;
+    int phase = 0;
+
+    // ── Material + PST + phase count ─────────────────────────────────────────
     for (int color = 0; color < 2; color++) {
         const int sign = (color == WHITE) ? 1 : -1;
         for (int piece = 0; piece < 6; piece++) {
             U64 bb = b.pieces[color][piece];
+            phase += popcount(bb) * PHASE_WEIGHTS[piece];
             while (bb) {
                 int sq = popLSBIdx(bb);
                 int pstSq = (color == WHITE) ? sq : mirrorSquare(sq);
-                score += sign * (PIECE_VALUES[piece] + PST[piece][pstSq]);
+                mgScore += sign * (PIECE_VALUES[piece] + PST_MG[piece][pstSq]);
+                egScore += sign * (PIECE_VALUES[piece] + PST_EG[piece][pstSq]);
             }
         }
     }
+
+    // Clamp phase to [0, TOTAL_PHASE]
+    phase = std::min(phase, TOTAL_PHASE);
+
+    // ── Pawn structure ────────────────────────────────────────────────────────
+    for (int color = 0; color < 2; color++) {
+        const int sign = (color == WHITE) ? 1 : -1;
+        const int them = 1 - color;
+        U64 myPawns = b.pieces[color][PAWN];
+        U64 theirPawns = b.pieces[them][PAWN];
+        U64 pawns = myPawns;
+
+        while (pawns) {
+            int sq = popLSBIdx(pawns);
+            int file = sq % 8;
+            int rank = sq / 8;
+            int normalRank = (color == WHITE) ? rank : (7 - rank);
+
+            // Doubled pawns - another friendly pawn on the same file ahead
+            if (frontSpan(color, sq) & myPawns) {
+                mgScore += sign * -15;
+                egScore += sign * -25;
+            }
+
+            // Isolated pawns - no friendly pawns on adjacent files
+            if (!(adjacentFiles(file) & myPawns)) {
+                mgScore += sign * -15;
+                egScore += sign * -20;
+            }
+
+            // Passed pawn - no enemy pawns can block or capture
+            if (!(passedPawnMask(color, sq) & theirPawns)) {
+                int bonus = PASSED_PAWN_BONUS[normalRank];
+                mgScore += sign * bonus / 2;
+                egScore += sign * bonus;
+            }
+        }
+    }
+
+    // ── Bishop pair ───────────────────────────────────────────────────────────
+    for (int color = 0; color < 2; color++) {
+        const int sign = (color == WHITE) ? 1 : -1;
+        if (popcount(b.pieces[color][BISHOP]) >= 2) {
+            mgScore += sign * 30;
+            egScore += sign * 50;
+        }
+    }
+
+    // ── Rook placement ────────────────────────────────────────────────────────
+    for (int color = 0; color < 2; color++) {
+        const int sign = (color == WHITE) ? 1 : -1;
+        const int them = 1 - color;
+        U64 rooks = b.pieces[color][ROOK];
+        U64 myPawns = b.pieces[color][PAWN];
+        U64 theirPawns = b.pieces[them][PAWN];
+        int rank7 = (color == WHITE) ? 6 : 1;
+
+        while (rooks) {
+            int sq = popLSBIdx(rooks);
+            int file = sq % 8;
+            int rank = sq / 8;
+            U64 fmask = fileMask(file);
+
+            // Open file (no pawns of either colour)
+            if (!(fmask & (myPawns | theirPawns))) {
+                mgScore += sign * 20;
+                egScore += sign * 15;
+            }
+            // Semi-open file (no friendly pawns)
+            else if (!(fmask & myPawns)) {
+                mgScore += sign * 10;
+                egScore += sign * 8;
+            }
+
+            // Rook on 7th rank
+            if (rank == rank7) {
+                mgScore += sign * 20;
+                egScore += sign * 30;
+            }
+        }
+    }
+
+    // ── Mobility ─────────────────────────────────────────────────────────────
+    // Count legal target squares for minor pieces and rooks/queens.
+    // Bonus per extra move: small but consistent.
+    for (int color = 0; color < 2; color++) {
+        const int sign = (color == WHITE) ? 1 : -1;
+        const U64 occ = b.occupied[BOTH];
+        const U64 myOcc = b.occupied[color];
+
+        // Knights
+        U64 knights = b.pieces[color][KNIGHT];
+        while (knights) {
+            int sq = popLSBIdx(knights);
+            int moves = popcount(KNIGHT_ATTACKS[sq] & ~myOcc);
+            mgScore += sign * (moves - 4) * 4;  // 4 is average knight mobility
+            egScore += sign * (moves - 4) * 4;
+        }
+
+        // Bishops
+        U64 bishops = b.pieces[color][BISHOP];
+        while (bishops) {
+            int sq = popLSBIdx(bishops);
+            int moves = popcount(bishopAttacks(sq, occ) & ~myOcc);
+            mgScore += sign * (moves - 7) * 3;  // 7 is average bishop mobility
+            egScore += sign * (moves - 7) * 4;
+        }
+
+        // Rooks
+        U64 rooks = b.pieces[color][ROOK];
+        while (rooks) {
+            int sq = popLSBIdx(rooks);
+            int moves = popcount(rookAttacks(sq, occ) & ~myOcc);
+            mgScore += sign * (moves - 7) * 2;
+            egScore += sign * (moves - 7) * 3;
+        }
+
+        // Queens
+        U64 queens = b.pieces[color][QUEEN];
+        while (queens) {
+            int sq = popLSBIdx(queens);
+            int moves = popcount(queenAttacks(sq, occ) & ~myOcc);
+            mgScore += sign * (moves - 14) * 1;
+            egScore += sign * (moves - 14) * 2;
+        }
+    }
+
+    // ── King safety ───────────────────────────────────────────────────────────
+    for (int color = 0; color < 2; color++) {
+        const int sign = (color == WHITE) ? 1 : -1;
+        int ks = b.kingSquare(color);
+        if (ks == NO_SQ) continue;
+        int kfile = ks % 8;
+        int krank = ks / 8;
+        U64 myPawns = b.pieces[color][PAWN];
+
+        // Pawn shield: friendly pawns directly in front of king
+        int shield = 0;
+        int dir = (color == WHITE) ? 1 : -1;
+        for (int df = -1; df <= 1; df++) {
+            int f = kfile + df;
+            int r = krank + dir;
+            if (f >= 0 && f < 8 && r >= 0 && r < 8) {
+                if (myPawns & setBit(r * 8 + f)) shield++;
+                // Two-square shield also counts (less)
+                int r2 = krank + 2 * dir;
+                if (r2 >= 0 && r2 < 8 && (myPawns & setBit(r2 * 8 + f))) shield++;
+            }
+        }
+        mgScore += sign * shield * 8;
+
+        // Open file near king penalty
+        for (int df = -1; df <= 1; df++) {
+            int f = kfile + df;
+            if (f < 0 || f > 7) continue;
+            U64 fmask = fileMask(f);
+            if (!(fmask & b.pieces[color][PAWN])) {
+                // No friendly pawn on file — open or semi-open
+                bool open = !(fmask & b.pieces[1 - color][PAWN]);
+                mgScore += sign * (open ? -20 : -10);
+            }
+        }
+    }
+
+    // ── Tapered interpolation ─────────────────────────────────────────────────
+    // phase == TOTAL_PHASE → pure middlegame
+    // phase == 0           → pure endgame
+    int score = (mgScore * phase + egScore * (TOTAL_PHASE - phase)) / TOTAL_PHASE;
+
     return (b.sideToMove == WHITE) ? score : -score;
 }
 
@@ -663,7 +965,7 @@ inline int scoreMove(const Move& m, const Move& ttMove) {
 inline void sortMoves(MoveList& ml, const Move& ttMove) {
     std::sort(ml.moves, ml.moves + ml.count, [&](const Move& a, const Move& b) {
         return scoreMove(a, ttMove) > scoreMove(b, ttMove);
-    });
+        });
 }
 
 // ─── Search ───────────────────────────────────────────────────────────────────

@@ -10,3 +10,4 @@ This is my first vibe coding "experiment" - I will find out how much the AIs hav
 * 4 (05/05/26, Claude): Structural refactor.
 * 5 (05/05/26, Claude): Random opening move.
 * 6 (05/05/26, Claude): Optimise move sorting function.
+* 7 (05/05/26, Claude): Heuristics.
