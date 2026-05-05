@@ -1,5 +1,5 @@
 /*
- * Chess Engine in C++
+ * Stockparrot - an AI generated C++ chess engine
  * Features:
  *  - Bitboard board representation
  *  - Full legal move generation (including castling, en passant, promotions)
@@ -18,12 +18,15 @@
 #include <cstring>
 #include <cassert>
 #include <chrono>
-#include <unordered_map>
 #include <sstream>
 #include <random>
+#include <bit>
 
-using namespace std;
 using U64 = uint64_t;
+
+// ─── Portable bit intrinsics (C++20) ─────────────────────────────────────────
+inline int lsb(U64 b)      { return std::countr_zero(b); }
+inline int popcount(U64 b) { return std::popcount(b); }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -47,8 +50,8 @@ const int INF = 1000000;
 const int MATE_SCORE = 900000;
 const int MAX_DEPTH = 64;
 
-const string PIECE_CHARS = "PNBRQKpnbrqk.";
-const string SQ_NAMES[] = {
+const std::string PIECE_CHARS = "PNBRQKpnbrqk.";
+const std::string SQ_NAMES[] = {
     "a1","b1","c1","d1","e1","f1","g1","h1",
     "a2","b2","c2","d2","e2","f2","g2","h2",
     "a3","b3","c3","d3","e3","f3","g3","h3",
@@ -61,8 +64,6 @@ const string SQ_NAMES[] = {
 
 // ─── Bitboard utilities ──────────────────────────────────────────────────────
 
-inline int lsb(U64 b) { return __builtin_ctzll(b); }
-inline int popcount(U64 b) { return __builtin_popcountll(b); }
 inline U64 popLSB(U64 &b) { U64 bit = b & (-b); b &= b-1; return bit; }
 inline int popLSBIdx(U64 &b) { int idx = lsb(b); b &= b-1; return idx; }
 
@@ -73,7 +74,7 @@ U64 KING_ATTACKS[64];
 U64 PAWN_ATTACKS[2][64];
 U64 RAY_ATTACKS[8][64];  // 8 directions
 
-// Magic bitboards for sliders
+// Magic bitboards for sliders (retained for potential future use)
 struct Magic {
     U64 mask;
     U64 magic;
@@ -151,63 +152,16 @@ U64 getRookAttacks(int sq, U64 occ) {
            slideAttacks(sq, occ,  0,  1) | slideAttacks(sq, occ,  0, -1);
 }
 
-// Initialize magic bitboards (using classical approach)
-void initMagics() {
-    for (int sq = 0; sq < 64; sq++) {
-        BISHOP_MAGIC[sq].mask = getBishopAttacks(sq, 0) & 0x007E7E7E7E7E7E00ULL;
-        BISHOP_MAGIC[sq].shift = 64 - popcount(BISHOP_MAGIC[sq].mask);
-        BISHOP_MAGIC[sq].attacks = BISHOP_ATTACK_TABLE[sq];
+inline U64 bishopAttacks(int sq, U64 occ) { return getBishopAttacks(sq, occ); }
+inline U64 rookAttacks(int sq, U64 occ)   { return getRookAttacks(sq, occ); }
+inline U64 queenAttacks(int sq, U64 occ)  { return getBishopAttacks(sq, occ) | getRookAttacks(sq, occ); }
 
-        ROOK_MAGIC[sq].mask = getRookAttacks(sq, 0);
-        // Remove edges
-        if (sq % 8 != 0) ROOK_MAGIC[sq].mask &= ~0x0101010101010101ULL;
-        if (sq % 8 != 7) ROOK_MAGIC[sq].mask &= ~0x8080808080808080ULL;
-        if (sq / 8 != 0) ROOK_MAGIC[sq].mask &= ~0x00000000000000FFULL;
-        if (sq / 8 != 7) ROOK_MAGIC[sq].mask &= ~0xFF00000000000000ULL;
-        ROOK_MAGIC[sq].shift = 64 - popcount(ROOK_MAGIC[sq].mask);
-        ROOK_MAGIC[sq].attacks = ROOK_ATTACK_TABLE[sq];
-    }
-
-    // Pre-fill attack tables using subset enumeration
-    for (int sq = 0; sq < 64; sq++) {
-        U64 mask = BISHOP_MAGIC[sq].mask;
-        U64 occ = 0;
-        do {
-            int idx = (int)(occ * 0x9E3779B97F4A7C15ULL >> BISHOP_MAGIC[sq].shift);
-            BISHOP_MAGIC[sq].attacks[idx] = getBishopAttacks(sq, occ);
-            occ = (occ - mask) & mask;
-        } while (occ);
-
-        mask = ROOK_MAGIC[sq].mask;
-        occ = 0;
-        do {
-            int idx = (int)(occ * 0x9E3779B97F4A7C15ULL >> ROOK_MAGIC[sq].shift);
-            ROOK_MAGIC[sq].attacks[idx] = getRookAttacks(sq, occ);
-            occ = (occ - mask) & mask;
-        } while (occ);
-    }
-}
-
-inline U64 bishopAttacks(int sq, U64 occ) {
-    return getBishopAttacks(sq, occ);
-}
-
-inline U64 rookAttacks(int sq, U64 occ) {
-    return getRookAttacks(sq, occ);
-}
-
-inline U64 queenAttacks(int sq, U64 occ) {
-    return getBishopAttacks(sq, occ) | getRookAttacks(sq, occ);
-}
-
-// ─── Move encoding ────────────────────────────────────────────────────────────
-// Bits: 0-5 from, 6-11 to, 12-14 promo piece, 15-17 flags
-// Flags: 0=quiet, 1=capture, 2=ep, 3=castle, 4=promo, 5=promo+cap
+// ─── Move ────────────────────────────────────────────────────────────────────
 
 struct Move {
     int from, to;
     int piece, captured;
-    int promo;  // NO_PIECE if not promotion
+    int promo;   // NO_PIECE if not a promotion
     bool ep;
     bool castle;
 
@@ -215,16 +169,18 @@ struct Move {
              promo(NO_PIECE), ep(false), castle(false) {}
 
     bool isNull() const { return from == 0 && to == 0; }
-    string toString() const {
-        string s = SQ_NAMES[from] + SQ_NAMES[to];
+
+    std::string toString() const {
+        std::string s = SQ_NAMES[from] + SQ_NAMES[to];
         if (promo != NO_PIECE) {
-            const string promos = "  nbrq";
+            const std::string promos = "  nbrq";
             s += promos[promo];
         }
         return s;
     }
+
     bool operator==(const Move& o) const {
-        return from==o.from && to==o.to && promo==o.promo;
+        return from == o.from && to == o.to && promo == o.promo;
     }
 };
 
@@ -233,9 +189,9 @@ const Move NULL_MOVE;
 // ─── Board ────────────────────────────────────────────────────────────────────
 
 struct Board {
-    U64 pieces[2][6];   // [color][piece]
-    U64 occupied[3];    // [WHITE], [BLACK], [BOTH]
-    int mailbox[64];    // piece type on each square (NO_PIECE if empty)
+    U64 pieces[2][6];    // [color][piece]
+    U64 occupied[3];     // [WHITE], [BLACK], [BOTH]
+    int mailbox[64];     // piece type on each square (NO_PIECE if empty)
     int mailboxColor[64];
 
     int sideToMove;
@@ -244,17 +200,16 @@ struct Board {
     int halfMoveClock;
     int fullMoveNumber;
 
-    // Zobrist hashing
     U64 hash;
 
     void clear() {
-        memset(pieces, 0, sizeof(pieces));
-        memset(occupied, 0, sizeof(occupied));
-        fill(mailbox, mailbox+64, NO_PIECE);
-        fill(mailboxColor, mailboxColor+64, BOTH);
-        sideToMove = WHITE;
-        castleRights = 0;
-        epSquare = NO_SQ;
+        std::memset(pieces, 0, sizeof(pieces));
+        std::memset(occupied, 0, sizeof(occupied));
+        std::fill(mailbox, mailbox + 64, NO_PIECE);
+        std::fill(mailboxColor, mailboxColor + 64, BOTH);
+        sideToMove    = WHITE;
+        castleRights  = 0;
+        epSquare      = NO_SQ;
         halfMoveClock = 0;
         fullMoveNumber = 1;
         hash = 0;
@@ -262,17 +217,17 @@ struct Board {
 
     void putPiece(int color, int piece, int sq) {
         pieces[color][piece] |= setBit(sq);
-        occupied[color] |= setBit(sq);
-        occupied[BOTH] |= setBit(sq);
-        mailbox[sq] = piece;
+        occupied[color]      |= setBit(sq);
+        occupied[BOTH]       |= setBit(sq);
+        mailbox[sq]      = piece;
         mailboxColor[sq] = color;
     }
 
     void removePiece(int color, int piece, int sq) {
         pieces[color][piece] &= ~setBit(sq);
-        occupied[color] &= ~setBit(sq);
-        occupied[BOTH] &= ~setBit(sq);
-        mailbox[sq] = NO_PIECE;
+        occupied[color]      &= ~setBit(sq);
+        occupied[BOTH]       &= ~setBit(sq);
+        mailbox[sq]      = NO_PIECE;
         mailboxColor[sq] = BOTH;
     }
 
@@ -283,11 +238,11 @@ struct Board {
 
     bool isAttacked(int sq, int byColor) const {
         U64 occ = occupied[BOTH];
-        if (PAWN_ATTACKS[1-byColor][sq] & pieces[byColor][PAWN]) return true;
-        if (KNIGHT_ATTACKS[sq] & pieces[byColor][KNIGHT]) return true;
-        if (KING_ATTACKS[sq] & pieces[byColor][KING]) return true;
+        if (PAWN_ATTACKS[1-byColor][sq] & pieces[byColor][PAWN])   return true;
+        if (KNIGHT_ATTACKS[sq]          & pieces[byColor][KNIGHT]) return true;
+        if (KING_ATTACKS[sq]            & pieces[byColor][KING])   return true;
         if (bishopAttacks(sq, occ) & (pieces[byColor][BISHOP] | pieces[byColor][QUEEN])) return true;
-        if (rookAttacks(sq, occ) & (pieces[byColor][ROOK] | pieces[byColor][QUEEN])) return true;
+        if (rookAttacks(sq, occ)   & (pieces[byColor][ROOK]   | pieces[byColor][QUEEN])) return true;
         return false;
     }
 
@@ -299,11 +254,11 @@ struct Board {
     bool inCheck() const {
         int ks = kingSquare(sideToMove);
         if (ks == NO_SQ) return false;
-        return isAttacked(ks, 1-sideToMove);
+        return isAttacked(ks, 1 - sideToMove);
     }
 
-    void setFromFEN(const string& fen);
-    string toFEN() const;
+    void setFromFEN(const std::string& fen);
+    std::string toFEN() const;
 };
 
 // ─── Zobrist keys ─────────────────────────────────────────────────────────────
@@ -314,14 +269,14 @@ U64 ZOBRIST_CASTLE[16];
 U64 ZOBRIST_EP[8];
 
 void initZobrist() {
-    mt19937_64 rng(0x12345678ABCDEFULL);
+    std::mt19937_64 rng(0x12345678ABCDEFULL);
     for (int c = 0; c < 2; c++)
         for (int p = 0; p < 6; p++)
             for (int sq = 0; sq < 64; sq++)
                 ZOBRIST_PIECE[c][p][sq] = rng();
     ZOBRIST_SIDE = rng();
     for (int i = 0; i < 16; i++) ZOBRIST_CASTLE[i] = rng();
-    for (int i = 0; i < 8; i++) ZOBRIST_EP[i] = rng();
+    for (int i = 0; i < 8;  i++) ZOBRIST_EP[i]     = rng();
 }
 
 U64 computeHash(const Board& b) {
@@ -339,10 +294,10 @@ U64 computeHash(const Board& b) {
 
 // ─── FEN parsing ──────────────────────────────────────────────────────────────
 
-void Board::setFromFEN(const string& fen) {
+void Board::setFromFEN(const std::string& fen) {
     clear();
-    istringstream ss(fen);
-    string pos, side, castle, ep;
+    std::istringstream ss(fen);
+    std::string pos, side, castle, ep;
     int hmove, fmove;
     ss >> pos >> side >> castle >> ep >> hmove >> fmove;
 
@@ -350,48 +305,48 @@ void Board::setFromFEN(const string& fen) {
     for (char c : pos) {
         if (c == '/') { sq -= 16; continue; }
         if (c >= '1' && c <= '8') { sq += c - '0'; continue; }
-        int color = islower(c) ? BLACK : WHITE;
-        string pieces_str = "PNBRQKpnbrqk";
-        int pidx = (int)pieces_str.find(c);
+        int color = std::islower(c) ? BLACK : WHITE;
+        std::string pieces_str = "PNBRQKpnbrqk";
+        int pidx  = (int)pieces_str.find(c);
         int piece = pidx % 6;
         putPiece(color, piece, sq++);
     }
 
-    sideToMove = (side == "b") ? BLACK : WHITE;
+    sideToMove   = (side == "b") ? BLACK : WHITE;
     castleRights = 0;
-    if (castle.find('K') != string::npos) castleRights |= WK;
-    if (castle.find('Q') != string::npos) castleRights |= WQ;
-    if (castle.find('k') != string::npos) castleRights |= BK;
-    if (castle.find('q') != string::npos) castleRights |= BQ;
+    if (castle.find('K') != std::string::npos) castleRights |= WK;
+    if (castle.find('Q') != std::string::npos) castleRights |= WQ;
+    if (castle.find('k') != std::string::npos) castleRights |= BK;
+    if (castle.find('q') != std::string::npos) castleRights |= BQ;
 
     epSquare = NO_SQ;
     if (ep != "-") {
         int file = ep[0] - 'a';
         int rank = ep[1] - '1';
-        epSquare = rank*8 + file;
+        epSquare = rank * 8 + file;
     }
 
-    halfMoveClock = hmove;
+    halfMoveClock  = hmove;
     fullMoveNumber = fmove;
     hash = computeHash(*this);
 }
 
-string Board::toFEN() const {
-    string fen = "";
+std::string Board::toFEN() const {
+    std::string fen;
     for (int rank = 7; rank >= 0; rank--) {
         int empty = 0;
         for (int file = 0; file < 8; file++) {
-            int sq = rank*8 + file;
+            int sq = rank * 8 + file;
             if (mailbox[sq] == NO_PIECE) { empty++; continue; }
-            if (empty) { fen += char('0'+empty); empty = 0; }
-            const string ps = "PNBRQKpnbrqk";
-            fen += ps[mailbox[sq] + (mailboxColor[sq]==BLACK ? 6 : 0)];
+            if (empty) { fen += char('0' + empty); empty = 0; }
+            const std::string ps = "PNBRQKpnbrqk";
+            fen += ps[mailbox[sq] + (mailboxColor[sq] == BLACK ? 6 : 0)];
         }
-        if (empty) fen += char('0'+empty);
+        if (empty) fen += char('0' + empty);
         if (rank > 0) fen += '/';
     }
     fen += (sideToMove == WHITE) ? " w " : " b ";
-    string cr = "";
+    std::string cr;
     if (castleRights & WK) cr += 'K';
     if (castleRights & WQ) cr += 'Q';
     if (castleRights & BK) cr += 'k';
@@ -399,7 +354,7 @@ string Board::toFEN() const {
     if (cr.empty()) cr = "-";
     fen += cr + " ";
     fen += (epSquare == NO_SQ) ? "-" : SQ_NAMES[epSquare];
-    fen += " " + to_string(halfMoveClock) + " " + to_string(fullMoveNumber);
+    fen += " " + std::to_string(halfMoveClock) + " " + std::to_string(fullMoveNumber);
     return fen;
 }
 
@@ -408,19 +363,18 @@ string Board::toFEN() const {
 struct MoveList {
     Move moves[256];
     int count = 0;
-
     void add(Move m) { moves[count++] = m; }
 };
 
 void generatePawnMoves(const Board& b, MoveList& ml, bool capturesOnly) {
-    int us = b.sideToMove, them = 1 - us;
-    int dir = (us == WHITE) ? 8 : -8;
+    int us       = b.sideToMove, them = 1 - us;
+    int dir      = (us == WHITE) ? 8 : -8;
     int startRank = (us == WHITE) ? 1 : 6;
     int promoRank = (us == WHITE) ? 7 : 0;
 
-    U64 pawns = b.pieces[us][PAWN];
+    U64 pawns   = b.pieces[us][PAWN];
     U64 enemies = b.occupied[them];
-    U64 empty = ~b.occupied[BOTH];
+    U64 empty   = ~b.occupied[BOTH];
 
     while (pawns) {
         int from = popLSBIdx(pawns);
@@ -434,9 +388,7 @@ void generatePawnMoves(const Board& b, MoveList& ml, bool capturesOnly) {
             m.from = from; m.to = to;
             m.piece = PAWN; m.captured = b.mailbox[to];
             if (to / 8 == promoRank) {
-                for (int p : {QUEEN, ROOK, BISHOP, KNIGHT}) {
-                    m.promo = p; ml.add(m);
-                }
+                for (int p : {QUEEN, ROOK, BISHOP, KNIGHT}) { m.promo = p; ml.add(m); }
             } else { ml.add(m); }
         }
 
@@ -455,9 +407,7 @@ void generatePawnMoves(const Board& b, MoveList& ml, bool capturesOnly) {
                 Move m;
                 m.from = from; m.to = to; m.piece = PAWN;
                 if (to / 8 == promoRank) {
-                    for (int p : {QUEEN, ROOK, BISHOP, KNIGHT}) {
-                        m.promo = p; ml.add(m);
-                    }
+                    for (int p : {QUEEN, ROOK, BISHOP, KNIGHT}) { m.promo = p; ml.add(m); }
                 } else { ml.add(m); }
 
                 // Double push
@@ -475,9 +425,9 @@ void generatePawnMoves(const Board& b, MoveList& ml, bool capturesOnly) {
 }
 
 void generatePieceMoves(const Board& b, MoveList& ml, bool capturesOnly) {
-    int us = b.sideToMove;
+    int us       = b.sideToMove;
     U64 myPieces = b.occupied[us];
-    U64 occ = b.occupied[BOTH];
+    U64 occ      = b.occupied[BOTH];
 
     // Knights
     U64 knights = b.pieces[us][KNIGHT];
@@ -487,7 +437,7 @@ void generatePieceMoves(const Board& b, MoveList& ml, bool capturesOnly) {
         if (capturesOnly) targets &= b.occupied[1-us];
         while (targets) {
             int to = popLSBIdx(targets);
-            Move m; m.from=from; m.to=to; m.piece=KNIGHT;
+            Move m; m.from = from; m.to = to; m.piece = KNIGHT;
             m.captured = b.mailbox[to];
             ml.add(m);
         }
@@ -501,7 +451,7 @@ void generatePieceMoves(const Board& b, MoveList& ml, bool capturesOnly) {
         if (capturesOnly) targets &= b.occupied[1-us];
         while (targets) {
             int to = popLSBIdx(targets);
-            Move m; m.from=from; m.to=to; m.piece=BISHOP;
+            Move m; m.from = from; m.to = to; m.piece = BISHOP;
             m.captured = b.mailbox[to];
             ml.add(m);
         }
@@ -515,7 +465,7 @@ void generatePieceMoves(const Board& b, MoveList& ml, bool capturesOnly) {
         if (capturesOnly) targets &= b.occupied[1-us];
         while (targets) {
             int to = popLSBIdx(targets);
-            Move m; m.from=from; m.to=to; m.piece=ROOK;
+            Move m; m.from = from; m.to = to; m.piece = ROOK;
             m.captured = b.mailbox[to];
             ml.add(m);
         }
@@ -529,7 +479,7 @@ void generatePieceMoves(const Board& b, MoveList& ml, bool capturesOnly) {
         if (capturesOnly) targets &= b.occupied[1-us];
         while (targets) {
             int to = popLSBIdx(targets);
-            Move m; m.from=from; m.to=to; m.piece=QUEEN;
+            Move m; m.from = from; m.to = to; m.piece = QUEEN;
             m.captured = b.mailbox[to];
             ml.add(m);
         }
@@ -542,7 +492,7 @@ void generatePieceMoves(const Board& b, MoveList& ml, bool capturesOnly) {
         if (capturesOnly) targets &= b.occupied[1-us];
         while (targets) {
             int to = popLSBIdx(targets);
-            Move m; m.from=from; m.to=to; m.piece=KING;
+            Move m; m.from = from; m.to = to; m.piece = KING;
             m.captured = b.mailbox[to];
             ml.add(m);
         }
@@ -552,32 +502,32 @@ void generatePieceMoves(const Board& b, MoveList& ml, bool capturesOnly) {
 void generateCastlingMoves(const Board& b, MoveList& ml) {
     if (b.inCheck()) return;
     U64 occ = b.occupied[BOTH];
-    int us = b.sideToMove;
+    int us  = b.sideToMove;
 
     if (us == WHITE) {
         if ((b.castleRights & WK) &&
             !(occ & (setBit(F1)|setBit(G1))) &&
             !b.isAttacked(F1, BLACK) && !b.isAttacked(G1, BLACK)) {
-            Move m; m.from=E1; m.to=G1; m.piece=KING; m.castle=true;
+            Move m; m.from = E1; m.to = G1; m.piece = KING; m.castle = true;
             ml.add(m);
         }
         if ((b.castleRights & WQ) &&
             !(occ & (setBit(B1)|setBit(C1)|setBit(D1))) &&
             !b.isAttacked(C1, BLACK) && !b.isAttacked(D1, BLACK)) {
-            Move m; m.from=E1; m.to=C1; m.piece=KING; m.castle=true;
+            Move m; m.from = E1; m.to = C1; m.piece = KING; m.castle = true;
             ml.add(m);
         }
     } else {
         if ((b.castleRights & BK) &&
             !(occ & (setBit(F8)|setBit(G8))) &&
             !b.isAttacked(F8, WHITE) && !b.isAttacked(G8, WHITE)) {
-            Move m; m.from=E8; m.to=G8; m.piece=KING; m.castle=true;
+            Move m; m.from = E8; m.to = G8; m.piece = KING; m.castle = true;
             ml.add(m);
         }
         if ((b.castleRights & BQ) &&
             !(occ & (setBit(B8)|setBit(C8)|setBit(D8))) &&
             !b.isAttacked(C8, WHITE) && !b.isAttacked(D8, WHITE)) {
-            Move m; m.from=E8; m.to=C8; m.piece=KING; m.castle=true;
+            Move m; m.from = E8; m.to = C8; m.piece = KING; m.castle = true;
             ml.add(m);
         }
     }
@@ -589,36 +539,25 @@ void generateMoves(const Board& b, MoveList& ml, bool capturesOnly = false) {
     if (!capturesOnly) generateCastlingMoves(b, ml);
 }
 
-// ─── Make/unmake move ─────────────────────────────────────────────────────────
-
-struct UndoInfo {
-    int castleRights;
-    int epSquare;
-    int halfMoveClock;
-    U64 hash;
-};
+// ─── Make move ────────────────────────────────────────────────────────────────
 
 bool makeMove(Board& b, const Move& m) {
     int us = b.sideToMove, them = 1 - us;
 
-    // Save captured piece
     if (m.captured != NO_PIECE && !m.ep) {
         b.removePiece(them, m.captured, m.to);
         b.hash ^= ZOBRIST_PIECE[them][m.captured][m.to];
     }
 
-    // En passant capture
     if (m.ep) {
         int capSq = m.to + (us == WHITE ? -8 : 8);
         b.removePiece(them, PAWN, capSq);
         b.hash ^= ZOBRIST_PIECE[them][PAWN][capSq];
     }
 
-    // Move piece
     b.hash ^= ZOBRIST_PIECE[us][m.piece][m.from];
     b.movePiece(us, m.piece, m.from, m.to);
 
-    // Promotion
     if (m.promo != NO_PIECE) {
         b.removePiece(us, PAWN, m.to);
         b.putPiece(us, m.promo, m.to);
@@ -628,7 +567,6 @@ bool makeMove(Board& b, const Move& m) {
         b.hash ^= ZOBRIST_PIECE[us][m.piece][m.to];
     }
 
-    // Castling: move rook
     if (m.castle) {
         if (m.to == G1) { b.movePiece(WHITE, ROOK, H1, F1); b.hash ^= ZOBRIST_PIECE[WHITE][ROOK][H1] ^ ZOBRIST_PIECE[WHITE][ROOK][F1]; }
         if (m.to == C1) { b.movePiece(WHITE, ROOK, A1, D1); b.hash ^= ZOBRIST_PIECE[WHITE][ROOK][A1] ^ ZOBRIST_PIECE[WHITE][ROOK][D1]; }
@@ -636,7 +574,6 @@ bool makeMove(Board& b, const Move& m) {
         if (m.to == C8) { b.movePiece(BLACK, ROOK, A8, D8); b.hash ^= ZOBRIST_PIECE[BLACK][ROOK][A8] ^ ZOBRIST_PIECE[BLACK][ROOK][D8]; }
     }
 
-    // Update castling rights
     b.hash ^= ZOBRIST_CASTLE[b.castleRights];
     if (m.piece == KING) {
         b.castleRights &= (us == WHITE) ? ~(WK|WQ) : ~(BK|BQ);
@@ -647,10 +584,9 @@ bool makeMove(Board& b, const Move& m) {
     if (m.from == H8 || m.to == H8) b.castleRights &= ~BK;
     b.hash ^= ZOBRIST_CASTLE[b.castleRights];
 
-    // Update en passant
     if (b.epSquare != NO_SQ) b.hash ^= ZOBRIST_EP[b.epSquare % 8];
     b.epSquare = NO_SQ;
-    if (m.piece == PAWN && abs(m.to - m.from) == 16) {
+    if (m.piece == PAWN && std::abs(m.to - m.from) == 16) {
         b.epSquare = (m.from + m.to) / 2;
         b.hash ^= ZOBRIST_EP[b.epSquare % 8];
     }
@@ -661,23 +597,13 @@ bool makeMove(Board& b, const Move& m) {
     b.sideToMove = them;
     b.hash ^= ZOBRIST_SIDE;
 
-    // Check legality: is our king in check?
     int ks = b.kingSquare(us);
-    if (ks == NO_SQ || b.isAttacked(ks, them)) {
-        return false; // illegal move
-    }
+    if (ks == NO_SQ || b.isAttacked(ks, them)) return false;
     return true;
-}
-
-// Full board copy for undo (simpler and correct)
-Board makeMoveCopy(Board b, const Move& m) {
-    makeMove(b, m);
-    return b;
 }
 
 // ─── Piece-square tables ──────────────────────────────────────────────────────
 
-// Values in centipawns
 const int PIECE_VALUES[6] = { 100, 320, 330, 500, 900, 20000 };
 
 const int PST[6][64] = {
@@ -737,9 +663,7 @@ const int PST[6][64] = {
    20, 30, 10,  0,  0, 10, 30, 20 }
 };
 
-int mirrorSquare(int sq) {
-    return (7 - sq/8)*8 + sq%8;
-}
+int mirrorSquare(int sq) { return (7 - sq/8)*8 + sq%8; }
 
 int evaluate(const Board& b) {
     int score = 0;
@@ -763,30 +687,28 @@ int evaluate(const Board& b) {
 enum TTFlag { TT_EXACT, TT_ALPHA, TT_BETA };
 
 struct TTEntry {
-    U64 hash;
-    int depth;
-    int score;
-    TTFlag flag;
-    Move bestMove;
+    U64    hash     = 0;
+    int    depth    = 0;
+    int    score    = 0;
+    TTFlag flag     = TT_EXACT;
+    Move   bestMove = {};
 };
 
-const int TT_SIZE = 1 << 20; // ~1M entries
+const int TT_SIZE = 1 << 20;
 TTEntry TT[TT_SIZE];
 
 void ttStore(U64 hash, int depth, int score, TTFlag flag, Move best) {
-    int idx = hash % TT_SIZE;
-    TT[idx] = {hash, depth, score, flag, best};
+    TT[hash % TT_SIZE] = {hash, depth, score, flag, best};
 }
 
 bool ttProbe(U64 hash, int depth, int alpha, int beta, int& score, Move& bestMove) {
-    int idx = hash % TT_SIZE;
-    TTEntry& e = TT[idx];
+    TTEntry& e = TT[hash % TT_SIZE];
     if (e.hash != hash) return false;
     bestMove = e.bestMove;
     if (e.depth >= depth) {
         if (e.flag == TT_EXACT) { score = e.score; return true; }
         if (e.flag == TT_ALPHA && e.score <= alpha) { score = alpha; return true; }
-        if (e.flag == TT_BETA  && e.score >= beta)  { score = beta; return true; }
+        if (e.flag == TT_BETA  && e.score >= beta)  { score = beta;  return true; }
     }
     return false;
 }
@@ -798,17 +720,18 @@ int mvvLva(int attacker, int victim) {
 }
 
 int scoreMove(const Move& m, const Move& ttMove) {
-    if (m == ttMove) return 1000000;
-    if (m.promo == QUEEN) return 900000;
-    if (m.captured != NO_PIECE) return 500000 + mvvLva(m.piece, m.captured);
+    if (m == ttMove)              return 1000000;
+    if (m.promo == QUEEN)         return  900000;
+    if (m.captured != NO_PIECE)   return  500000 + mvvLva(m.piece, m.captured);
     return 0;
 }
 
 void sortMoves(MoveList& ml, const Move& ttMove) {
-    vector<pair<int,int>> scored;
+    std::vector<std::pair<int,int>> scored;
+    scored.reserve(ml.count);
     for (int i = 0; i < ml.count; i++)
         scored.push_back({scoreMove(ml.moves[i], ttMove), i});
-    sort(scored.rbegin(), scored.rend());
+    std::sort(scored.rbegin(), scored.rend());
     MoveList sorted;
     for (auto& p : scored) sorted.add(ml.moves[p.second]);
     ml = sorted;
@@ -817,15 +740,15 @@ void sortMoves(MoveList& ml, const Move& ttMove) {
 // ─── Search ───────────────────────────────────────────────────────────────────
 
 struct SearchInfo {
-    int nodes;
+    int  nodes;
     bool stop;
-    chrono::time_point<chrono::steady_clock> startTime;
-    int timeLimit; // ms
+    std::chrono::time_point<std::chrono::steady_clock> startTime;
+    int  timeLimit; // ms
 
     bool timeUp() {
         if ((nodes & 4095) == 0) {
-            auto now = chrono::steady_clock::now();
-            int elapsed = (int)chrono::duration_cast<chrono::milliseconds>(now - startTime).count();
+            auto now = std::chrono::steady_clock::now();
+            int elapsed = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime).count();
             if (elapsed >= timeLimit) stop = true;
         }
         return stop;
@@ -837,22 +760,20 @@ int quiescence(Board& b, int alpha, int beta, SearchInfo& info) {
     if (info.timeUp()) return 0;
 
     int stand_pat = evaluate(b);
-    if (stand_pat >= beta) return beta;
-    if (stand_pat > alpha) alpha = stand_pat;
+    if (stand_pat >= beta)  return beta;
+    if (stand_pat > alpha)  alpha = stand_pat;
 
     MoveList ml;
     generateMoves(b, ml, true);
 
     Move ttMove;
-    Move dummy;
-    int dummy_score;
+    int  dummy_score;
     ttProbe(b.hash, 0, alpha, beta, dummy_score, ttMove);
     sortMoves(ml, ttMove);
 
     for (int i = 0; i < ml.count; i++) {
         Board nb = b;
         if (!makeMove(nb, ml.moves[i])) continue;
-
         int score = -quiescence(nb, -beta, -alpha, info);
         if (score >= beta) return beta;
         if (score > alpha) alpha = score;
@@ -866,9 +787,8 @@ int alphaBeta(Board& b, int depth, int alpha, int beta, SearchInfo& info) {
 
     if (depth == 0) return quiescence(b, alpha, beta, info);
 
-    // TT probe
     Move ttMove;
-    int ttScore;
+    int  ttScore;
     if (ttProbe(b.hash, depth, alpha, beta, ttScore, ttMove))
         return ttScore;
 
@@ -876,9 +796,9 @@ int alphaBeta(Board& b, int depth, int alpha, int beta, SearchInfo& info) {
     generateMoves(b, ml);
     sortMoves(ml, ttMove);
 
-    int origAlpha = alpha;
+    int  origAlpha = alpha;
     Move bestMove;
-    int legalMoves = 0;
+    int  legalMoves = 0;
 
     for (int i = 0; i < ml.count; i++) {
         Board nb = b;
@@ -889,7 +809,7 @@ int alphaBeta(Board& b, int depth, int alpha, int beta, SearchInfo& info) {
         if (info.stop) return 0;
 
         if (score > alpha) {
-            alpha = score;
+            alpha    = score;
             bestMove = ml.moves[i];
             if (score >= beta) {
                 ttStore(b.hash, depth, beta, TT_BETA, bestMove);
@@ -898,10 +818,8 @@ int alphaBeta(Board& b, int depth, int alpha, int beta, SearchInfo& info) {
         }
     }
 
-    if (legalMoves == 0) {
-        // Checkmate or stalemate
+    if (legalMoves == 0)
         return b.inCheck() ? -(MATE_SCORE - (info.nodes % 100)) : 0;
-    }
 
     TTFlag flag = (alpha > origAlpha) ? TT_EXACT : TT_ALPHA;
     ttStore(b.hash, depth, alpha, flag, bestMove);
@@ -910,17 +828,17 @@ int alphaBeta(Board& b, int depth, int alpha, int beta, SearchInfo& info) {
 
 Move searchBestMove(Board& b, int timeLimitMs, int maxDepth = MAX_DEPTH) {
     SearchInfo info;
-    info.nodes = 0;
-    info.stop = false;
-    info.startTime = chrono::steady_clock::now();
+    info.nodes     = 0;
+    info.stop      = false;
+    info.startTime = std::chrono::steady_clock::now();
     info.timeLimit = timeLimitMs;
 
     Move bestMove;
-    int bestScore = 0;
+    int  bestScore = 0;
 
     for (int depth = 1; depth <= maxDepth; depth++) {
         Move ttMove;
-        int score;
+        int  score;
         if (!ttProbe(b.hash, depth, -INF, INF, score, ttMove))
             ttMove = bestMove;
 
@@ -928,7 +846,7 @@ Move searchBestMove(Board& b, int timeLimitMs, int maxDepth = MAX_DEPTH) {
         generateMoves(b, ml);
         sortMoves(ml, ttMove);
 
-        int alpha = -INF, beta = INF;
+        int  alpha = -INF, beta = INF;
         Move currentBest;
 
         for (int i = 0; i < ml.count; i++) {
@@ -939,34 +857,36 @@ Move searchBestMove(Board& b, int timeLimitMs, int maxDepth = MAX_DEPTH) {
             if (info.stop) goto done;
 
             if (s > alpha) {
-                alpha = s;
+                alpha       = s;
                 currentBest = ml.moves[i];
             }
         }
 
         if (!currentBest.isNull()) {
-            bestMove = currentBest;
+            bestMove  = currentBest;
             bestScore = alpha;
         }
 
-        auto elapsed = chrono::duration_cast<chrono::milliseconds>(
-            chrono::steady_clock::now() - info.startTime).count();
+        {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - info.startTime).count();
 
-        cerr << "info depth " << depth
-             << " score cp " << bestScore
-             << " nodes " << info.nodes
-             << " time " << elapsed
-             << " pv " << bestMove.toString() << "\n";
+            std::cerr << "info depth " << depth
+                      << " score cp "  << bestScore
+                      << " nodes "     << info.nodes
+                      << " time "      << elapsed
+                      << " pv "        << bestMove.toString() << "\n";
 
-        if (elapsed * 2 > timeLimitMs) break;
+            if (elapsed * 2 > timeLimitMs) break;
+        }
     }
 done:
     return bestMove;
 }
 
-// ─── UCI Interface ────────────────────────────────────────────────────────────
+// ─── UCI interface ────────────────────────────────────────────────────────────
 
-Move parseMove(const Board& b, const string& moveStr) {
+Move parseMove(const Board& b, const std::string& moveStr) {
     MoveList ml;
     generateMoves(b, ml);
     for (int i = 0; i < ml.count; i++) {
@@ -983,46 +903,44 @@ int main() {
     initKingAttacks();
     initPawnAttacks();
     initZobrist();
-    memset(TT, 0, sizeof(TT));
+    std::fill(TT, TT + TT_SIZE, TTEntry{});
 
-    Board board;
-    string line;
+    Board       board;
+    std::string line;
 
-    while (getline(cin, line)) {
-        istringstream ss(line);
-        string token;
+    while (std::getline(std::cin, line)) {
+        std::istringstream ss(line);
+        std::string token;
         ss >> token;
 
         if (token == "uci") {
-            cout << "id name ChessCPP\n";
-            cout << "id author Claude\n";
-            cout << "uciok\n";
+            std::cout << "id name Stockparrot\n";
+            std::cout << "id author i42output\n";
+            std::cout << "uciok\n";
         }
         else if (token == "isready") {
-            cout << "readyok\n";
+            std::cout << "readyok\n";
         }
         else if (token == "ucinewgame") {
             board.setFromFEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-            memset(TT, 0, sizeof(TT));
+            std::fill(TT, TT + TT_SIZE, TTEntry{});
         }
         else if (token == "position") {
-            string type;
+            std::string type;
             ss >> type;
             if (type == "startpos") {
                 board.setFromFEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
             } else if (type == "fen") {
-                string fen = "", part;
+                std::string fen, part;
                 for (int i = 0; i < 6 && ss >> part; i++) {
                     if (part == "moves") break;
                     fen += (i ? " " : "") + part;
                 }
                 board.setFromFEN(fen);
-                // read 'moves' token if not already consumed
-                string maybe;
+                std::string maybe;
                 if (part != "moves") ss >> maybe;
             }
-            string moves_token;
-            // look for "moves" keyword
+            std::string moves_token;
             while (ss >> moves_token) {
                 if (moves_token == "moves") continue;
                 Move m = parseMove(board, moves_token);
@@ -1030,48 +948,48 @@ int main() {
             }
         }
         else if (token == "go") {
-            int timeLimit = 3000; // default 3 seconds
-            string param;
+            int timeLimit = 3000;
+            std::string param;
             int wtime = -1, btime = -1, movetime = -1, depth = -1;
             while (ss >> param) {
-                if (param == "wtime") ss >> wtime;
-                else if (param == "btime") ss >> btime;
+                if      (param == "wtime")    ss >> wtime;
+                else if (param == "btime")    ss >> btime;
                 else if (param == "movetime") ss >> movetime;
-                else if (param == "depth") ss >> depth;
+                else if (param == "depth")    ss >> depth;
             }
             if (movetime > 0) {
                 timeLimit = movetime;
             } else if (board.sideToMove == WHITE && wtime > 0) {
-                timeLimit = max(100, wtime / 30);
+                timeLimit = std::max(100, wtime / 30);
             } else if (board.sideToMove == BLACK && btime > 0) {
-                timeLimit = max(100, btime / 30);
+                timeLimit = std::max(100, btime / 30);
             }
 
             int maxD = (depth > 0) ? depth : MAX_DEPTH;
             Move best = searchBestMove(board, timeLimit, maxD);
-            cout << "bestmove " << best.toString() << "\n";
-            cout.flush();
+            std::cout << "bestmove " << best.toString() << "\n";
+            std::cout.flush();
         }
         else if (token == "quit") {
             break;
         }
         else if (token == "d") {
-            // Debug: print board
             for (int rank = 7; rank >= 0; rank--) {
                 for (int file = 0; file < 8; file++) {
-                    int sq = rank*8 + file;
-                    if (board.mailbox[sq] == NO_PIECE) cout << ". ";
-                    else {
+                    int sq = rank * 8 + file;
+                    if (board.mailbox[sq] == NO_PIECE) {
+                        std::cout << ". ";
+                    } else {
                         int p = board.mailbox[sq];
                         int c = board.mailboxColor[sq];
-                        cout << (char)(c == WHITE ? "PNBRQK"[p] : "pnbrqk"[p]) << " ";
+                        std::cout << (char)(c == WHITE ? "PNBRQK"[p] : "pnbrqk"[p]) << " ";
                     }
                 }
-                cout << "\n";
+                std::cout << "\n";
             }
-            cout << board.toFEN() << "\n";
+            std::cout << board.toFEN() << "\n";
         }
-        cout.flush();
+        std::cout.flush();
     }
     return 0;
 }
