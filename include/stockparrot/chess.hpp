@@ -782,11 +782,12 @@ inline Move searchBestMove(Board& b, int timeLimitMs, int maxDepth = MAX_DEPTH) 
         {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - info.startTime).count();
-            std::cerr << "info depth " << depth
-                      << " score cp "  << bestScore
-                      << " nodes "     << info.nodes
-                      << " time "      << elapsed
-                      << " pv "        << bestMove.toString() << "\n";
+            std::cerr << "info depth: " << depth
+                      << " score cp: "  << bestScore
+                      << " nodes: "     << info.nodes
+                      << " time: "      << elapsed
+                      << " nodes/sec: " << (elapsed != 0 ? info.nodes * 1000 / elapsed : 0)
+                      << " pv: "        << bestMove.toString() << "\n";
             if (elapsed * 2 > timeLimitMs) break;
         }
     }
