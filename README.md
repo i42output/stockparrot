@@ -1,7 +1,7 @@
 # Stockparrot
 Stockparrot - an AI generated C++ chess engine.
 
-This is my first vibe coding "experiment" - I will find out how much the AIs have really evolved from being just stochastic parrots. It will not be pure vibe coding: I will be making manual modifications to the codebase as required and resubmit to the LLM next iteration.
+This is my first vibe coding "experiment" - I will find out how much the AIs have really evolved from being just stochastic parrots. It will not be pure vibe coding: I will be making manual modifications to the codebase as required and resubmit to the LLM next iteration - a technique I like to call "vibe assist".
 
 # Iterations
 * 1 (05/05/26, Claude): Claude created initial version which had a bug which allowed illegal moves.
