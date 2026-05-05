@@ -9,3 +9,4 @@ This is my first vibe coding "experiment" - I will find out how much the AIs hav
 * 3 (05/05/26, Claude): Add CMake support, C++20 and &lt;bit&gt;, replace "using namespace std;" with explicit "std::" qualification.
 * 4 (05/05/26, Claude): Structural refactor.
 * 5 (05/05/26, Claude): Random opening move.
+* 6 (05/05/26, Claude): Optimise move sorting function.

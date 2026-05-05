@@ -661,14 +661,9 @@ inline int scoreMove(const Move& m, const Move& ttMove) {
 }
 
 inline void sortMoves(MoveList& ml, const Move& ttMove) {
-    std::vector<std::pair<int, int>> scored;
-    scored.reserve(ml.count);
-    for (int i = 0; i < ml.count; i++)
-        scored.push_back({ scoreMove(ml.moves[i], ttMove), i });
-    std::sort(scored.rbegin(), scored.rend());
-    MoveList sorted;
-    for (auto& [s, i] : scored) sorted.add(ml.moves[i]);
-    ml = sorted;
+    std::sort(ml.moves, ml.moves + ml.count, [&](const Move& a, const Move& b) {
+        return scoreMove(a, ttMove) > scoreMove(b, ttMove);
+    });
 }
 
 // ─── Search ───────────────────────────────────────────────────────────────────
