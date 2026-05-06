@@ -1304,13 +1304,50 @@ namespace stockparrot {
             return alpha;
         }
 
-        int alphaBeta(Board& b, int depth, int alpha, int beta, SearchInfo& info) {
+        int alphaBeta(Board& b, int depth, int alpha, int beta, SearchInfo& info, bool nullAllowed = true) {
             if (info.timeUp()) return 0;
             info.nodes.fetch_add(1, std::memory_order_relaxed);
             if (depth == 0) return quiescence(b, alpha, beta, info);
 
             Move ttMove; int ttScore;
             if (ttProbe(b.hash, depth, alpha, beta, ttScore, ttMove)) return ttScore;
+
+            // ── Null move pruning ─────────────────────────────────────────────────
+            // Skip in check, at low depth, or when we just did a null move.
+            // Also skip in likely zugzwang positions (no major/minor pieces left).
+            const bool inCheck = b.inCheck();
+            const bool hasPieces = b.pieces[b.sideToMove][KNIGHT]
+                | b.pieces[b.sideToMove][BISHOP]
+                | b.pieces[b.sideToMove][ROOK]
+                | b.pieces[b.sideToMove][QUEEN];
+            if (nullAllowed && !inCheck && hasPieces && depth >= 3) {
+                // Make null move: flip side to move, keep everything else
+                const int R = (depth >= 6) ? 3 : 2;  // reduction factor
+                UndoInfo undo;
+                undo.hash = b.hash;
+                undo.castleRights = b.castleRights;
+                undo.epSquare = b.epSquare;
+                undo.halfMoveClock = b.halfMoveClock;
+                undo.capturedPiece = NO_PIECE;
+                undo.capturedSq = NO_SQ;
+                undo.mgScore = b.mgScore;
+                undo.egScore = b.egScore;
+                undo.phase = b.phase;
+
+                if (b.epSquare != NO_SQ) b.hash ^= ZOBRIST_EP[b.epSquare % 8];
+                b.epSquare = NO_SQ;
+                b.sideToMove = 1 - b.sideToMove;
+                b.hash ^= ZOBRIST_SIDE;
+
+                int nullScore = -alphaBeta(b, depth - 1 - R, -beta, -beta + 1, info, false);
+
+                // Restore board state
+                b.hash = undo.hash;
+                b.epSquare = undo.epSquare;
+                b.sideToMove = 1 - b.sideToMove;
+
+                if (nullScore >= beta) return beta;
+            }
 
             MoveList ml;
             generateMoves(b, ml);
