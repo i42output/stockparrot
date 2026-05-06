@@ -31,15 +31,17 @@ misrepresented as being the original software.
  * Features:
  *  - Bitboard board representation
  *  - Full legal move generation (including castling, en passant, promotions)
- *  - Alpha-beta search with iterative deepening
+ *  - Alpha-beta / NegaScout search with iterative deepening
  *  - Quiescence search
- *  - Piece-square table evaluation
- *  - Move ordering (captures, promotions first)
- *  - Transposition table
+ *  - Tapered evaluation with PST, pawn structure, mobility, king safety
+ *  - Move ordering (TT move, captures by MVV-LVA, promotions)
+ *  - Transposition table with cache-line alignment
+ *  - Lazy SMP multithreading
  *  - UCI protocol support
  */
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cstdint>
@@ -49,6 +51,7 @@ misrepresented as being the original software.
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <uci/uci.hpp>
@@ -105,16 +108,16 @@ namespace stockparrot {
     // ─── Bitboard utilities ───────────────────────────────────────────────────────
 
     inline U64 setBit(int sq) { return 1ULL << sq; }
-    inline U64 popLSB(U64& b) { U64 bit = b & -b; b &= b - 1; return bit; }
+    inline U64 popLSB(U64& b) { U64 bit = b & (~b + 1); b &= b - 1; return bit; }
     inline int popLSBIdx(U64& b) { int idx = lsb(b); b &= b - 1; return idx; }
 
-    // ─── Attack tables (global, initialised once via std::call_once) ──────────────
+    // ─── Attack tables ────────────────────────────────────────────────────────────
 
     inline U64 KNIGHT_ATTACKS[64] = {};
     inline U64 KING_ATTACKS[64] = {};
     inline U64 PAWN_ATTACKS[2][64] = {};
 
-    // ─── Magic bitboard attack tables ────────────────────────────────────────────
+    // ─── Magic bitboard attack tables ─────────────────────────────────────────────
     // Well-known magic numbers from Pradyumna Kannan's public domain magic move generator.
 
     inline constexpr U64 ROOK_MAGICS[64] = {
@@ -177,13 +180,12 @@ namespace stockparrot {
         58,59,59,59,59,59,59,58,
     };
 
-    // Attack tables sized per square (max 4096 rook, 512 bishop)
     inline U64 ROOK_ATTACK_TABLE[64][4096] = {};
     inline U64 BISHOP_ATTACK_TABLE[64][512] = {};
     inline U64 ROOK_MASKS[64] = {};
     inline U64 BISHOP_MASKS[64] = {};
 
-    // Classical slider (used only during initialisation)
+    // Classical slider (used only during magic table initialisation)
     inline U64 slideAttacks(int sq, U64 occ, int dx, int dy) {
         U64 attacks = 0;
         int x = sq % 8, y = sq / 8;
@@ -290,17 +292,14 @@ namespace stockparrot {
             ROOK_MASKS[sq] = rookMaskFor(sq);
             BISHOP_MASKS[sq] = bishopMaskFor(sq);
 
-            // Enumerate all subsets of the mask and populate attack tables
-            U64 rMask = ROOK_MASKS[sq];
-            U64 occ = 0;
+            U64 rMask = ROOK_MASKS[sq], occ = 0;
             do {
                 int idx = (int)((occ * ROOK_MAGICS[sq]) >> ROOK_SHIFTS[sq]);
                 ROOK_ATTACK_TABLE[sq][idx] = getRookAttacks(sq, occ);
                 occ = (occ - rMask) & rMask;
             } while (occ);
 
-            U64 bMask = BISHOP_MASKS[sq];
-            occ = 0;
+            U64 bMask = BISHOP_MASKS[sq]; occ = 0;
             do {
                 int idx = (int)((occ * BISHOP_MAGICS[sq]) >> BISHOP_SHIFTS[sq]);
                 BISHOP_ATTACK_TABLE[sq][idx] = getBishopAttacks(sq, occ);
@@ -309,7 +308,7 @@ namespace stockparrot {
         }
     }
 
-    // ─── Evaluation ───────────────────────────────────────────────────────────────
+    // ─── Evaluation constants ─────────────────────────────────────────────────────
 
     inline constexpr int PIECE_VALUES[6] = { 100, 320, 330, 500, 900, 20000 };
     inline constexpr int PHASE_WEIGHTS[6] = { 0, 1, 1, 2, 4, 0 };
@@ -430,6 +429,7 @@ namespace stockparrot {
     };
 
     inline int mirrorSquare(int sq) { return (7 - sq / 8) * 8 + sq % 8; }
+
     // ─── Move ─────────────────────────────────────────────────────────────────────
 
     struct Move {
@@ -501,7 +501,6 @@ namespace stockparrot {
             occupied[BOTH] |= setBit(sq);
             mailbox[sq] = piece;
             mailboxColor[sq] = color;
-            // Update incremental scores
             const int sign = (color == WHITE) ? 1 : -1;
             const int pstSq = (color == WHITE) ? sq : mirrorSquare(sq);
             mgScore += sign * (PIECE_VALUES[piece] + PST_MG[piece][pstSq]);
@@ -515,7 +514,6 @@ namespace stockparrot {
             occupied[BOTH] &= ~setBit(sq);
             mailbox[sq] = NO_PIECE;
             mailboxColor[sq] = BOTH;
-            // Update incremental scores
             const int sign = (color == WHITE) ? 1 : -1;
             const int pstSq = (color == WHITE) ? sq : mirrorSquare(sq);
             mgScore -= sign * (PIECE_VALUES[piece] + PST_MG[piece][pstSq]);
@@ -779,7 +777,6 @@ namespace stockparrot {
     inline bool makeMove(Board& b, const Move& m, UndoInfo& undo) {
         const int us = b.sideToMove, them = 1 - us;
 
-        // Save state for unmake
         undo.hash = b.hash;
         undo.castleRights = b.castleRights;
         undo.epSquare = b.epSquare;
@@ -846,10 +843,9 @@ namespace stockparrot {
     }
 
     inline void unmakeMove(Board& b, const Move& m, const UndoInfo& undo) {
-        const int us = 1 - b.sideToMove;  // side that made the move
+        const int us = 1 - b.sideToMove;
         const int them = b.sideToMove;
 
-        // Restore scalar state directly from undo
         b.hash = undo.hash;
         b.castleRights = undo.castleRights;
         b.epSquare = undo.epSquare;
@@ -860,20 +856,16 @@ namespace stockparrot {
         b.sideToMove = us;
         if (us == BLACK) b.fullMoveNumber--;
 
-        // Undo promotion: replace promoted piece with pawn
         if (m.promo != NO_PIECE) {
             b.removePiece(us, m.promo, m.to);
             b.putPiece(us, PAWN, m.to);
         }
 
-        // Move piece back
         b.movePiece(us, m.piece, m.to, m.from);
 
-        // Restore captured piece
         if (m.captured != NO_PIECE)
             b.putPiece(them, m.captured, undo.capturedSq);
 
-        // Undo castling: move rook back
         if (m.castle) {
             if (m.to == G1) b.movePiece(WHITE, ROOK, F1, H1);
             if (m.to == C1) b.movePiece(WHITE, ROOK, D1, A1);
@@ -882,24 +874,22 @@ namespace stockparrot {
         }
     }
 
-    // Convenience overload for the old copy-based call sites (applyMove in driver)
+    // Convenience overload for positions where undo is not needed
     inline bool makeMove(Board& b, const Move& m) {
         UndoInfo undo;
         return makeMove(b, m, undo);
     }
 
+    // ─── Precomputed pawn evaluation masks ───────────────────────────────────────
 
     inline constexpr int PASSED_PAWN_BONUS[8] = { 0, 10, 20, 35, 55, 80, 120, 0 };
 
     inline U64 fileMask(int file) { return 0x0101010101010101ULL << file; }
 
-    // ─── Precomputed pawn evaluation masks ───────────────────────────────────────
-    // Populated by initPawnMasks() — avoids per-node looping in evaluate().
-
-    inline U64 FRONT_SPAN[2][64] = {};  // squares ahead of a pawn on same file
-    inline U64 PASSED_PAWN_MASK[2][64] = {};  // squares that must be clear for a passed pawn
-    inline U64 ADJACENT_FILES[8] = {};  // neighbour files for isolated pawn detection
-    inline U64 FILE_MASK[8] = {};  // full file bitboard
+    inline U64 FRONT_SPAN[2][64] = {};
+    inline U64 PASSED_PAWN_MASK[2][64] = {};
+    inline U64 ADJACENT_FILES[8] = {};
+    inline U64 FILE_MASK[8] = {};
 
     inline void initPawnMasks() {
         for (int f = 0; f < 8; f++) {
@@ -910,15 +900,12 @@ namespace stockparrot {
         }
         for (int sq = 0; sq < 64; sq++) {
             int file = sq % 8, rank = sq / 8;
-            // White front span: all squares above on same file
             U64 wSpan = 0;
             for (int r = rank + 1; r < 8; r++) wSpan |= setBit(r * 8 + file);
             FRONT_SPAN[WHITE][sq] = wSpan;
-            // Black front span: all squares below on same file
             U64 bSpan = 0;
             for (int r = rank - 1; r >= 0; r--) bSpan |= setBit(r * 8 + file);
             FRONT_SPAN[BLACK][sq] = bSpan;
-            // Passed pawn mask = front span + same span on adjacent files
             for (int color : {WHITE, BLACK}) {
                 U64 mask = FRONT_SPAN[color][sq];
                 for (int df : {-1, 1}) {
@@ -936,9 +923,9 @@ namespace stockparrot {
         }
     }
 
+    // ─── Evaluation ───────────────────────────────────────────────────────────────
+
     inline int evaluate(const Board& b) {
-        // Material + PST is maintained incrementally in b.mgScore / b.egScore / b.phase.
-        // Here we add the positional terms that depend on piece interactions.
         int mgScore = b.mgScore;
         int egScore = b.egScore;
         int phase = std::min(b.phase, TOTAL_PHASE);
@@ -958,7 +945,8 @@ namespace stockparrot {
                 if (!(ADJACENT_FILES[file] & myPawns)) { mgScore += sign * -15; egScore += sign * -20; }
                 if (!(PASSED_PAWN_MASK[color][sq] & theirPawns)) {
                     int bonus = PASSED_PAWN_BONUS[normalRank];
-                    mgScore += sign * bonus / 2; egScore += sign * bonus;
+                    mgScore += sign * bonus / 2;
+                    egScore += sign * bonus;
                 }
             }
 
@@ -967,22 +955,29 @@ namespace stockparrot {
             const int rank7 = (color == WHITE) ? 6 : 1;
             U64 rooks = b.pieces[color][ROOK];
             while (rooks) {
-                int sq = popLSBIdx(rooks), file = sq % 8, rank = sq / 8;
+                int sq = popLSBIdx(rooks);
+                int file = sq % 8, rank = sq / 8;
                 U64 fm = FILE_MASK[file];
                 if (!(fm & (myPawns | theirPawns))) { mgScore += sign * 20; egScore += sign * 15; }
                 else if (!(fm & myPawns)) { mgScore += sign * 10; egScore += sign * 8; }
                 if (rank == rank7) { mgScore += sign * 20; egScore += sign * 30; }
             }
 
-            const U64 occ = b.occupied[BOTH], myOcc = b.occupied[color];
-            U64 kn = b.pieces[color][KNIGHT]; while (kn) { int sq = popLSBIdx(kn); int mv = popcount(KNIGHT_ATTACKS[sq] & ~myOcc);       mgScore += sign * (mv - 4) * 4;  egScore += sign * (mv - 4) * 4; }
-            U64 bi = b.pieces[color][BISHOP]; while (bi) { int sq = popLSBIdx(bi); int mv = popcount(bishopAttacks(sq, occ) & ~myOcc);    mgScore += sign * (mv - 7) * 3;  egScore += sign * (mv - 7) * 4; }
-            U64 ro = b.pieces[color][ROOK];   while (ro) { int sq = popLSBIdx(ro); int mv = popcount(rookAttacks(sq, occ) & ~myOcc);      mgScore += sign * (mv - 7) * 2;  egScore += sign * (mv - 7) * 3; }
-            U64 qu = b.pieces[color][QUEEN];  while (qu) { int sq = popLSBIdx(qu); int mv = popcount(queenAttacks(sq, occ) & ~myOcc);     mgScore += sign * (mv - 14) * 1; egScore += sign * (mv - 14) * 2; }
+            const U64 occ = b.occupied[BOTH];
+            const U64 myOcc = b.occupied[color];
+            U64 kn = b.pieces[color][KNIGHT];
+            while (kn) { int sq = popLSBIdx(kn); int mv = popcount(KNIGHT_ATTACKS[sq] & ~myOcc);       mgScore += sign * (mv - 4) * 4; egScore += sign * (mv - 4) * 4; }
+            U64 bi = b.pieces[color][BISHOP];
+            while (bi) { int sq = popLSBIdx(bi); int mv = popcount(bishopAttacks(sq, occ) & ~myOcc);   mgScore += sign * (mv - 7) * 3; egScore += sign * (mv - 7) * 4; }
+            U64 ro = b.pieces[color][ROOK];
+            while (ro) { int sq = popLSBIdx(ro); int mv = popcount(rookAttacks(sq, occ) & ~myOcc);     mgScore += sign * (mv - 7) * 2; egScore += sign * (mv - 7) * 3; }
+            U64 qu = b.pieces[color][QUEEN];
+            while (qu) { int sq = popLSBIdx(qu); int mv = popcount(queenAttacks(sq, occ) & ~myOcc);    mgScore += sign * (mv - 14) * 1; egScore += sign * (mv - 14) * 2; }
 
             int ks = b.kingSquare(color);
             if (ks != NO_SQ) {
-                int kfile = ks % 8, krank = ks / 8, kdir = (color == WHITE) ? 1 : -1;
+                int kfile = ks % 8, krank = ks / 8;
+                int kdir = (color == WHITE) ? 1 : -1;
                 int shield = 0;
                 for (int df = -1; df <= 1; df++) {
                     int f = kfile + df, r = krank + kdir;
@@ -1007,17 +1002,27 @@ namespace stockparrot {
         return (b.sideToMove == WHITE) ? score : -score;
     }
 
-    // ─── Transposition table entry ────────────────────────────────────────────────
+    // ─── Transposition table ──────────────────────────────────────────────────────
 
     enum TTFlag { TT_EXACT, TT_ALPHA, TT_BETA };
 
-    struct TTEntry {
+    // alignas(64) ensures each entry occupies its own cache line, eliminating
+    // false sharing between threads writing to adjacent TT slots.
+    // C4324 (structure padded due to alignment) is intentional — suppress it.
+#ifdef _MSC_VER
+#   pragma warning(push)
+#   pragma warning(disable: 4324)
+#endif
+    struct alignas(64) TTEntry {
         U64    hash = 0;
         int    depth = 0;
         int    score = 0;
         TTFlag flag = TT_EXACT;
         Move   bestMove = {};
     };
+#ifdef _MSC_VER
+#   pragma warning(pop)
+#endif
 
     // ─── Move ordering ────────────────────────────────────────────────────────────
 
@@ -1039,20 +1044,22 @@ namespace stockparrot {
     }
 
     // ─── Search info ─────────────────────────────────────────────────────────────
+    // Shared across all Lazy SMP threads — stop and nodes are atomic.
 
     struct SearchInfo {
-        int  nodes = 0;
-        bool stop = false;
+        std::atomic<bool> stop{ false };
+        std::atomic<int>  nodes{ 0 };
         int  timeLimit = 0;
         std::chrono::time_point<std::chrono::steady_clock> startTime;
 
         bool timeUp() {
-            if ((nodes & 4095) == 0) {
+            if ((nodes.load(std::memory_order_relaxed) & 4095) == 0) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - startTime).count();
-                if (elapsed >= timeLimit) stop = true;
+                if (elapsed >= timeLimit)
+                    stop.store(true, std::memory_order_relaxed);
             }
-            return stop;
+            return stop.load(std::memory_order_relaxed);
         }
     };
 
@@ -1060,10 +1067,12 @@ namespace stockparrot {
     //
     // Owns the board and transposition table. Implements i_uci so it can be driven
     // directly by any UCI client without going through driver.cpp's raw string parsing.
+    // Supports Lazy SMP multithreading via the Threads UCI option.
 
     struct Engine : uci::i_uci {
         Board                board;
         std::vector<TTEntry> tt;
+        int                  numThreads = 1;
 
         Engine() : tt(TT_SIZE) {
             static std::once_flag initFlag;
@@ -1089,7 +1098,6 @@ namespace stockparrot {
             client = &aClient;
         }
 
-        // Parse and dispatch a raw UCI command string.
         void command(std::string const& line) final {
             std::istringstream ss(line);
             std::string token;
@@ -1102,7 +1110,6 @@ namespace stockparrot {
             else if (token == "ponderhit") { ponderhit(); }
             else if (token == "quit") { quit(); }
             else if (token == "setoption") {
-                // setoption name <name> value <value>
                 std::string nameKw, name, valueKw, value;
                 ss >> nameKw >> name >> valueKw >> value;
                 setoption(name, value);
@@ -1115,7 +1122,7 @@ namespace stockparrot {
                 if (type == "startpos") {
                     pos = uci::startpos{};
                     std::string maybe;
-                    ss >> maybe; // consume optional "moves"
+                    ss >> maybe;
                 }
                 else if (type == "fen") {
                     std::string fen, part;
@@ -1124,7 +1131,7 @@ namespace stockparrot {
                         fen += (i ? " " : "") + part;
                     }
                     pos = uci::fen{ static_cast<std::string>(fen) };
-                    if (part != "moves") { std::string tmp; ss >> tmp; } // consume "moves"
+                    if (part != "moves") { std::string tmp; ss >> tmp; }
                 }
                 std::string tok;
                 while (ss >> tok) {
@@ -1154,12 +1161,11 @@ namespace stockparrot {
             respond("id name Stockparrot\n"
                 "id author i42output\n"
                 "option name Hash type spin default 1 min 1 max 4096\n"
+                "option name Threads type spin default 1 min 1 max 256\n"
                 "uciok");
         }
 
-        void quit() final {
-            // Signal handled by driver
-        }
+        void quit() final {}
 
         void isready() final {
             respond("readyok");
@@ -1171,11 +1177,16 @@ namespace stockparrot {
         }
 
         void setoption(std::string const& name, std::string const& value) final {
-            if (name == "Hash") {
-                int mb = std::stoi(value);
-                mb = std::max(1, std::min(mb, 4096));
+            std::string lower = name;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (lower == "hash") {
+                int mb = std::max(1, std::min(std::stoi(value), 4096));
                 std::size_t entries = (static_cast<std::size_t>(mb) * 1024 * 1024) / sizeof(TTEntry);
                 tt.assign(entries, TTEntry{});
+            }
+            else if (lower == "threads") {
+                numThreads = std::max(1, std::min(std::stoi(value), 256));
             }
         }
 
@@ -1195,7 +1206,6 @@ namespace stockparrot {
         void go(uci::go_params const& params) final {
             int timeLimit = 3000;
             int maxDepth = MAX_DEPTH;
-
             int wtimeVal = -1, btimeVal = -1;
 
             for (auto const& p : params) {
@@ -1209,7 +1219,6 @@ namespace stockparrot {
                     }, p);
             }
 
-            // Apply time management only if movetime wasn't set explicitly
             bool hasMovetime = std::any_of(params.begin(), params.end(),
                 [](auto const& p) { return std::holds_alternative<uci::movetime>(p); });
             if (!hasMovetime) {
@@ -1219,18 +1228,13 @@ namespace stockparrot {
                     timeLimit = std::max(100, btimeVal / 30);
             }
 
-            Move best = searchBestMove(timeLimit, maxDepth);
+            Move best = searchBestMove(timeLimit, maxDepth, numThreads);
             if (client) client->bestmove(*this, best.toString());
             respond("bestmove " + best.toString());
         }
 
-        void stop() final {
-            // Future: signal search thread to stop
-        }
-
-        void ponderhit() final {
-            // Future: switch from pondering to thinking on the opponent's move
-        }
+        void stop() final {}
+        void ponderhit() final {}
 
     private:
         uci::i_uci_client* client = nullptr;
@@ -1277,7 +1281,7 @@ namespace stockparrot {
         // ── Search internals ──────────────────────────────────────────────────────
 
         int quiescence(Board& b, int alpha, int beta, SearchInfo& info) {
-            info.nodes++;
+            info.nodes.fetch_add(1, std::memory_order_relaxed);
             if (info.timeUp()) return 0;
 
             int stand_pat = evaluate(b);
@@ -1302,7 +1306,7 @@ namespace stockparrot {
 
         int alphaBeta(Board& b, int depth, int alpha, int beta, SearchInfo& info) {
             if (info.timeUp()) return 0;
-            info.nodes++;
+            info.nodes.fetch_add(1, std::memory_order_relaxed);
             if (depth == 0) return quiescence(b, alpha, beta, info);
 
             Move ttMove; int ttScore;
@@ -1330,7 +1334,7 @@ namespace stockparrot {
                     if (score > alpha && score < beta)
                         score = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
                 }
-                if (info.stop) return 0;
+                if (info.stop.load(std::memory_order_relaxed)) return 0;
 
                 if (score > alpha) {
                     alpha = score;
@@ -1343,16 +1347,46 @@ namespace stockparrot {
             }
 
             if (legalMoves == 0)
-                return b.inCheck() ? -(MATE_SCORE - (info.nodes % 100)) : 0;
+                return b.inCheck() ? -(MATE_SCORE - (info.nodes.load() % 100)) : 0;
 
             ttStore(b.hash, depth, alpha, (alpha > origAlpha) ? TT_EXACT : TT_ALPHA, bestMove);
             return alpha;
         }
 
-        Move searchBestMove(int timeLimitMs, int maxDepth) {
+        // Helper thread: runs its own iterative deepening, sharing the TT and
+        // SearchInfo with the main thread. Cross-pollinates the TT to help the
+        // main thread find better moves faster (Lazy SMP).
+        void helperThread(Board boardCopy, SearchInfo& info, int maxDepth) {
+            for (int depth = 1; depth <= maxDepth; depth++) {
+                if (info.stop.load(std::memory_order_relaxed)) break;
+                Move ttMove; int score;
+                ttProbe(boardCopy.hash, depth, -INF, INF, score, ttMove);
+                MoveList ml;
+                generateMoves(boardCopy, ml);
+                sortMoves(ml, ttMove);
+                int alpha = -INF, beta = INF;
+                for (int i = 0; i < ml.count; i++) {
+                    if (info.stop.load(std::memory_order_relaxed)) return;
+                    Board nb = boardCopy;
+                    if (!makeMove(nb, ml.moves[i])) continue;
+                    int s = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
+                    if (s > alpha) alpha = s;
+                }
+            }
+        }
+
+        Move searchBestMove(int timeLimitMs, int maxDepth, int threads = 1) {
             SearchInfo info;
             info.startTime = std::chrono::steady_clock::now();
             info.timeLimit = timeLimitMs;
+
+            // Launch helper threads (Lazy SMP)
+            std::vector<std::thread> helpers;
+            helpers.reserve(threads - 1);
+            for (int t = 1; t < threads; t++)
+                helpers.emplace_back([this, &info, maxDepth]() {
+                helperThread(board, info, maxDepth);
+                    });
 
             std::vector<std::pair<int, Move>> rootMoves;
             Move bestMove;
@@ -1373,7 +1407,7 @@ namespace stockparrot {
                     Board nb = board;
                     if (!makeMove(nb, ml.moves[i])) continue;
                     int s = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
-                    if (info.stop) goto done;
+                    if (info.stop.load(std::memory_order_relaxed)) goto done;
                     current.push_back({ s, ml.moves[i] });
                     if (s > alpha) alpha = s;
                 }
@@ -1388,18 +1422,16 @@ namespace stockparrot {
                 {
                     auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - info.startTime);
-                    long long nps = elapsedMs.count() > 0
-                        ? (info.nodes * 1000LL) / elapsedMs.count() : 0;
+                    long long totalNodes = info.nodes.load();
+                    long long nps = elapsedMs.count() > 0 ? (totalNodes * 1000LL) / elapsedMs.count() : 0;
 
                     if (client) {
-                        // Typed callback for structured consumers
-                        client->info(*this, depth, elapsedMs, info.nodes, nps,
+                        client->info(*this, depth, elapsedMs, totalNodes, nps,
                             bestScore, bestMove.toString());
-                        // Standard UCI string for GUIs
                         client->response(*this,
                             "info depth " + std::to_string(depth) +
                             " time " + std::to_string(elapsedMs.count()) +
-                            " nodes " + std::to_string(info.nodes) +
+                            " nodes " + std::to_string(totalNodes) +
                             " nps " + std::to_string(nps) +
                             " score cp " + std::to_string(bestScore) +
                             " pv " + bestMove.toString());
@@ -1407,7 +1439,7 @@ namespace stockparrot {
                     else {
                         std::cerr << "info depth " << depth
                             << " time " << elapsedMs.count()
-                            << " nodes " << info.nodes
+                            << " nodes " << totalNodes
                             << " nps " << nps
                             << " score cp " << bestScore
                             << " pv " << bestMove.toString() << "\n";
@@ -1416,6 +1448,11 @@ namespace stockparrot {
                 }
             }
         done:
+            // Signal helpers to stop and wait for them to finish
+            info.stop.store(true, std::memory_order_relaxed);
+            for (auto& t : helpers) t.join();
+
+            // Pick randomly among moves within VARIETY_MARGIN cp of the best
             std::vector<Move> candidates;
             for (auto& [s, m] : rootMoves)
                 if (s >= bestScore - VARIETY_MARGIN)

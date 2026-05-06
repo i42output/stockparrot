@@ -19,6 +19,8 @@ else()
 endif()
 
 # ── Target ────────────────────────────────────────────────────────────────────
+find_package(Threads REQUIRED)
+
 add_executable(stockparrot
     src/driver.cpp
     include/stockparrot/chess.hpp
@@ -29,6 +31,7 @@ source_group("Header Files" FILES include/stockparrot/chess.hpp)
 
 target_include_directories(stockparrot PRIVATE include)
 target_compile_features(stockparrot PRIVATE cxx_std_20)
+target_link_libraries(stockparrot PRIVATE Threads::Threads)
 
 # ── Install ───────────────────────────────────────────────────────────────────
 install(TARGETS stockparrot RUNTIME DESTINATION bin)
