@@ -16,3 +16,4 @@ This is my first vibe coding "experiment" - I will find out how much the AIs hav
 * 10 (05/05/26, Claude): NegaScout, info nps.
 * 11 (05/05/26, Claude): Performance.
 * 12 (05/05/26, Claude): Lazy SMP.
+* 13 (05/05/26, Claude): Null move pruning.
