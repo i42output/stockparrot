@@ -17,3 +17,4 @@ This is my first vibe coding "experiment" - I will find out how much the AIs hav
 * 11 (2026-05-05, Claude): Performance.
 * 12 (2026-05-06, Claude): Lazy SMP.
 * 13 (2026-05-06, Claude): Null move pruning.
+* 14 (2026-08-14, Claude Opus 5 High): Bugfixes.

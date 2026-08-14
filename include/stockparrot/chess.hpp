@@ -88,6 +88,9 @@ namespace stockparrot {
     inline constexpr int INF = 1000000;
     inline constexpr int MATE_SCORE = 900000;
     inline constexpr int MAX_DEPTH = 64;
+    inline constexpr int MAX_PLY = 256;
+    // Any |score| at or above this is a forced mate; the gap encodes distance in plies.
+    inline constexpr int MATE_IN_MAX = MATE_SCORE - MAX_PLY;
     inline constexpr int TT_SIZE = 1 << 20;
     inline constexpr int VARIETY_MARGIN = 15;
 
@@ -131,7 +134,7 @@ namespace stockparrot {
         0x12040280080080ULL,   0x100040080020080ULL,  0x9020010080800200ULL, 0x813241200148449ULL,
         0x491604001800080ULL,  0x100401000402001ULL,  0x4820010021001040ULL, 0x400402202000812ULL,
         0x209009005000802ULL,  0x810800601800400ULL,  0x4301083214000150ULL, 0x204026458e001401ULL,
-        0x40204000808000ULL,   0x8001008040010020ULL, 0x8410820820420010ULL, 0x1003010010002023ULL,
+        0x40204000808000ULL,   0x8001008040010020ULL, 0x8410820820420010ULL, 0x40100021010008ULL,   // d6 (sq 43): was 0x1003010010002023 -- 564 destructive collisions
         0x804040008008080ULL,  0x12000810020004ULL,   0x1000100200040208ULL, 0x430000a044020001ULL,
         0x280009023410300ULL,  0xe0100040002240ULL,   0x200100401700ULL,     0x2244100408008080ULL,
         0x8000400801980ULL,    0x2000810040200ULL,    0x8010100228810400ULL, 0x2000009044210200ULL,
@@ -308,6 +311,26 @@ namespace stockparrot {
         }
     }
 
+    // Verifies every magic index against the classical slider generator for every
+// occupancy subset of every square. O(107k) work; call once in tests/asserts.
+    inline bool verifyMagics() {
+        for (int sq = 0; sq < 64; sq++) {
+            if (64 - ROOK_SHIFTS[sq] != popcount(ROOK_MASKS[sq])) return false;
+            if (64 - BISHOP_SHIFTS[sq] != popcount(BISHOP_MASKS[sq])) return false;
+            U64 mask = ROOK_MASKS[sq], occ = 0;
+            do {
+                if (rookAttacks(sq, occ) != getRookAttacks(sq, occ)) return false;
+                occ = (occ - mask) & mask;
+            } while (occ);
+            mask = BISHOP_MASKS[sq]; occ = 0;
+            do {
+                if (bishopAttacks(sq, occ) != getBishopAttacks(sq, occ)) return false;
+                occ = (occ - mask) & mask;
+            } while (occ);
+        }
+        return true;
+    }
+
     // ─── Evaluation constants ─────────────────────────────────────────────────────
 
     inline constexpr int PIECE_VALUES[6] = { 100, 320, 330, 500, 900, 20000 };
@@ -446,7 +469,7 @@ namespace stockparrot {
         std::string toString() const {
             std::string s = SQ_NAMES[from] + SQ_NAMES[to];
             if (promo != NO_PIECE) {
-                const std::string promos = "  nbrq";
+                const std::string promos = " nbrq";
                 s += promos[promo];
             }
             return s;
@@ -645,9 +668,10 @@ namespace stockparrot {
     // ─── Move generation ──────────────────────────────────────────────────────────
 
     struct MoveList {
-        Move moves[256];
+        static constexpr int CAPACITY = 256;
+        Move moves[CAPACITY];
         int  count = 0;
-        void add(Move m) { moves[count++] = m; }
+        void add(Move m) { if (count < CAPACITY) moves[count++] = m; }
     };
 
     inline void generatePawnMoves(const Board& b, MoveList& ml, bool capturesOnly) {
@@ -729,27 +753,35 @@ namespace stockparrot {
     inline void generateCastlingMoves(const Board& b, MoveList& ml) {
         if (b.inCheck()) return;
         const U64 occ = b.occupied[BOTH];
-        const int us = b.sideToMove;
+        const int us = b.sideToMove, them = 1 - us;
 
-        if (us == WHITE) {
-            if ((b.castleRights & WK) && !(occ & (setBit(F1) | setBit(G1)))
-                && !b.isAttacked(F1, BLACK) && !b.isAttacked(G1, BLACK)) {
-                Move m; m.from = E1; m.to = G1; m.piece = KING; m.castle = true; ml.add(m);
-            }
-            if ((b.castleRights & WQ) && !(occ & (setBit(B1) | setBit(C1) | setBit(D1)))
-                && !b.isAttacked(C1, BLACK) && !b.isAttacked(D1, BLACK)) {
-                Move m; m.from = E1; m.to = C1; m.piece = KING; m.castle = true; ml.add(m);
-            }
+        // castleRights alone is not sufficient: a malformed FEN can advertise rights
+        // with no king or rook on the home squares, which would otherwise let
+        // makeMove() conjure a rook out of an empty square.
+        const int kSq = (us == WHITE) ? E1 : E8;
+        if (b.mailbox[kSq] != KING || b.mailboxColor[kSq] != us) return;
+
+        const int rightK = (us == WHITE) ? WK : BK;
+        const int rightQ = (us == WHITE) ? WQ : BQ;
+        const int rookH = (us == WHITE) ? H1 : H8;
+        const int rookA = (us == WHITE) ? A1 : A8;
+        const int sqF = (us == WHITE) ? F1 : F8;
+        const int sqG = (us == WHITE) ? G1 : G8;
+        const int sqD = (us == WHITE) ? D1 : D8;
+        const int sqC = (us == WHITE) ? C1 : C8;
+        const int sqB = (us == WHITE) ? B1 : B8;
+
+        if ((b.castleRights & rightK)
+            && b.mailbox[rookH] == ROOK && b.mailboxColor[rookH] == us
+            && !(occ & (setBit(sqF) | setBit(sqG)))
+            && !b.isAttacked(sqF, them) && !b.isAttacked(sqG, them)) {
+            Move m; m.from = kSq; m.to = sqG; m.piece = KING; m.castle = true; ml.add(m);
         }
-        else {
-            if ((b.castleRights & BK) && !(occ & (setBit(F8) | setBit(G8)))
-                && !b.isAttacked(F8, WHITE) && !b.isAttacked(G8, WHITE)) {
-                Move m; m.from = E8; m.to = G8; m.piece = KING; m.castle = true; ml.add(m);
-            }
-            if ((b.castleRights & BQ) && !(occ & (setBit(B8) | setBit(C8) | setBit(D8)))
-                && !b.isAttacked(C8, WHITE) && !b.isAttacked(D8, WHITE)) {
-                Move m; m.from = E8; m.to = C8; m.piece = KING; m.castle = true; ml.add(m);
-            }
+        if ((b.castleRights & rightQ)
+            && b.mailbox[rookA] == ROOK && b.mailboxColor[rookA] == us
+            && !(occ & (setBit(sqB) | setBit(sqC) | setBit(sqD)))
+            && !b.isAttacked(sqC, them) && !b.isAttacked(sqD, them)) {
+            Move m; m.from = kSq; m.to = sqC; m.piece = KING; m.castle = true; ml.add(m);
         }
     }
 
@@ -1043,6 +1075,43 @@ namespace stockparrot {
             });
     }
 
+    // ─── Draw detection ───────────────────────────────────────────────────────────
+    // history holds the Zobrist key of every position along the current path,
+    // including the position about to be examined (its last element).
+
+    inline bool isRepetition(const std::vector<U64>& history, const Board& b) {
+        if (b.halfMoveClock < 4 || history.size() < 5) return false;
+        const int last = static_cast<int>(history.size()) - 1;
+        const int limit = std::max(0, last - b.halfMoveClock);
+        for (int i = last - 2; i >= limit; i -= 2)
+            if (history[i] == b.hash) return true;
+        return false;
+    }
+
+    // Mate scores are stored relative to the current node, but must be cached in the
+    // TT relative to the mating position, otherwise a hit at a different ply reports
+    // the wrong distance.
+    inline int scoreToTT(int score, int ply) {
+        if (score >= MATE_IN_MAX)  return score + ply;
+        if (score <= -MATE_IN_MAX) return score - ply;
+        return score;
+    }
+
+    inline int scoreFromTT(int score, int ply) {
+        if (score >= MATE_IN_MAX)  return score - ply;
+        if (score <= -MATE_IN_MAX) return score + ply;
+        return score;
+    }
+
+    inline bool isMateScore(int score) {
+        return score >= MATE_IN_MAX || score <= -MATE_IN_MAX;
+    }
+
+    // Plies to mate, signed: positive means the side to move at the root delivers it.
+    inline int mateDistance(int score) {
+        return (score > 0) ? (MATE_SCORE - score + 1) / 2 : -((MATE_SCORE + score + 1) / 2);
+    }
+
     // ─── Search info ─────────────────────────────────────────────────────────────
     // Shared across all Lazy SMP threads — stop and nodes are atomic.
 
@@ -1073,6 +1142,10 @@ namespace stockparrot {
         Board                board;
         std::vector<TTEntry> tt;
         int                  numThreads = 1;
+        // Zobrist keys of every position in the game so far, ending with `board`.
+        // Required for repetition detection; without it the engine happily repeats
+        // a won position or walks into a draw it could have avoided.
+        std::vector<U64>     gameHistory;
 
         Engine() : tt(TT_SIZE) {
             static std::once_flag initFlag;
@@ -1085,6 +1158,7 @@ namespace stockparrot {
                 initZobrist();
                 });
             board.setFromFEN(START_FEN);
+            gameHistory.assign(1, board.hash);
             clearTT();
         }
 
@@ -1173,6 +1247,7 @@ namespace stockparrot {
 
         void ucinewgame() final {
             board.setFromFEN(START_FEN);
+            gameHistory.assign(1, board.hash);
             clearTT();
         }
 
@@ -1197,10 +1272,15 @@ namespace stockparrot {
             else {
                 board.setFromFEN(std::get<uci::fen>(pos));
             }
+            gameHistory.assign(1, board.hash);
             std::istringstream ss(moves);
             std::string tok;
-            while (ss >> tok)
-                applyMove(tok);
+            while (ss >> tok) {
+                if (!applyMove(tok)) {
+                    respond("info string illegal or unparsable move: " + tok);
+                    break;
+                }
+            }
         }
 
         void go(uci::go_params const& params) final {
@@ -1229,8 +1309,10 @@ namespace stockparrot {
             }
 
             Move best = searchBestMove(timeLimit, maxDepth, numThreads);
-            if (client) client->bestmove(*this, best.toString());
-            respond("bestmove " + best.toString());
+            // A terminal position yields the null move; UCI spells that "0000".
+            const std::string bestStr = best.isNull() ? "0000" : best.toString();
+            if (client) client->bestmove(*this, bestStr);
+            respond("bestmove " + bestStr);
         }
 
         void stop() final {}
@@ -1253,6 +1335,10 @@ namespace stockparrot {
                     Board nb = board;
                     if (makeMove(nb, ml.moves[i])) {
                         board = nb;
+                        // An irreversible move can never be repeated back to, so the
+                        // history before it is unreachable and can be discarded.
+                        if (board.halfMoveClock == 0) gameHistory.clear();
+                        gameHistory.push_back(board.hash);
                         return true;
                     }
                 }
@@ -1262,55 +1348,93 @@ namespace stockparrot {
 
         // ── TT access ─────────────────────────────────────────────────────────────
 
-        void ttStore(U64 hash, int depth, int score, TTFlag flag, Move best) {
-            tt[hash % tt.size()] = { hash, depth, score, flag, best };
+        void ttStore(U64 hash, int depth, int ply, int score, TTFlag flag, Move best) {
+            tt[hash % tt.size()] = { hash, depth, scoreToTT(score, ply), flag, best };
         }
 
-        bool ttProbe(U64 hash, int depth, int alpha, int beta, int& score, Move& bestMove) {
+        bool ttProbe(U64 hash, int depth, int ply, int alpha, int beta, int& score, Move& bestMove) {
             TTEntry& e = tt[hash % tt.size()];
             if (e.hash != hash) return false;
             bestMove = e.bestMove;
             if (e.depth >= depth) {
-                if (e.flag == TT_EXACT) { score = e.score; return true; }
-                if (e.flag == TT_ALPHA && e.score <= alpha) { score = alpha;  return true; }
-                if (e.flag == TT_BETA && e.score >= beta) { score = beta;   return true; }
+                const int s = scoreFromTT(e.score, ply);
+                if (e.flag == TT_EXACT) { score = s; return true; }
+                if (e.flag == TT_ALPHA && s <= alpha) { score = alpha; return true; }
+                if (e.flag == TT_BETA && s >= beta) { score = beta;  return true; }
             }
             return false;
         }
 
         // ── Search internals ──────────────────────────────────────────────────────
 
-        int quiescence(Board& b, int alpha, int beta, SearchInfo& info) {
+        // history carries the Zobrist key of every position on the current path,
+        // including b itself as the final element.
+
+        int quiescence(Board& b, int ply, int alpha, int beta,
+            SearchInfo& info, std::vector<U64>& history) {
             info.nodes.fetch_add(1, std::memory_order_relaxed);
             if (info.timeUp()) return 0;
+            if (ply >= MAX_PLY) return evaluate(b);
 
-            int stand_pat = evaluate(b);
-            if (stand_pat >= beta) return beta;
-            if (stand_pat > alpha) alpha = stand_pat;
+            // A side to move in check has no "stand pat" option — it must move, and
+            // it may be mated. Search every evasion, not just captures.
+            const bool inCheck = b.inCheck();
+
+            if (!inCheck) {
+                int standPat = evaluate(b);
+                if (standPat >= beta) return beta;
+                if (standPat > alpha) alpha = standPat;
+            }
 
             MoveList ml;
-            generateMoves(b, ml, true);
+            generateMoves(b, ml, !inCheck);
             Move ttMove; int dummy;
-            ttProbe(b.hash, 0, alpha, beta, dummy, ttMove);
+            ttProbe(b.hash, 0, ply, alpha, beta, dummy, ttMove);
             sortMoves(ml, ttMove);
 
+            int legalMoves = 0;
             for (int i = 0; i < ml.count; i++) {
                 Board nb = b;
                 if (!makeMove(nb, ml.moves[i])) continue;
-                int score = -quiescence(nb, -beta, -alpha, info);
+                legalMoves++;
+                history.push_back(nb.hash);
+                int score = -quiescence(nb, ply + 1, -beta, -alpha, info, history);
+                history.pop_back();
+                if (info.stop.load(std::memory_order_relaxed)) return 0;
                 if (score >= beta) return beta;
                 if (score > alpha) alpha = score;
             }
+
+            // Only meaningful when in check: we generated every move, so an empty
+            // legal set is mate. Out of check we generated captures only, so an empty
+            // set says nothing and alpha (the stand pat) already holds.
+            if (inCheck && legalMoves == 0) return -(MATE_SCORE - ply);
+
             return alpha;
         }
 
-        int alphaBeta(Board& b, int depth, int alpha, int beta, SearchInfo& info, bool nullAllowed = true) {
+        int alphaBeta(Board& b, int depth, int ply, int alpha, int beta,
+            SearchInfo& info, std::vector<U64>& history, bool nullAllowed = true) {
             if (info.timeUp()) return 0;
             info.nodes.fetch_add(1, std::memory_order_relaxed);
-            if (depth == 0) return quiescence(b, alpha, beta, info);
+
+            if (ply > 0) {
+                // Draw by repetition or by the fifty-move rule. Checking before move
+                // generation means a position that is mate on the hundredth half-move
+                // is scored as a draw; that is a known and vanishingly rare edge case.
+                if (isRepetition(history, b) || b.halfMoveClock >= 100) return 0;
+
+                // Mate distance pruning: if we already have a mate at least as fast as
+                // anything findable here, the window is empty.
+                alpha = std::max(alpha, -(MATE_SCORE - ply));
+                beta = std::min(beta, MATE_SCORE - ply - 1);
+                if (alpha >= beta) return alpha;
+            }
+
+            if (depth <= 0 || ply >= MAX_PLY) return quiescence(b, ply, alpha, beta, info, history);
 
             Move ttMove; int ttScore;
-            if (ttProbe(b.hash, depth, alpha, beta, ttScore, ttMove)) return ttScore;
+            if (ttProbe(b.hash, depth, ply, alpha, beta, ttScore, ttMove)) return ttScore;
 
             // ── Null move pruning ─────────────────────────────────────────────────
             // Skip in check, at low depth, or when we just did a null move.
@@ -1320,33 +1444,33 @@ namespace stockparrot {
                 | b.pieces[b.sideToMove][BISHOP]
                 | b.pieces[b.sideToMove][ROOK]
                 | b.pieces[b.sideToMove][QUEEN];
-            if (nullAllowed && !inCheck && hasPieces && depth >= 3) {
+            if (nullAllowed && !inCheck && hasPieces && depth >= 3 && !isMateScore(beta)) {
                 // Make null move: flip side to move, keep everything else
                 const int R = (depth >= 6) ? 3 : 2;  // reduction factor
-                UndoInfo undo;
-                undo.hash = b.hash;
-                undo.castleRights = b.castleRights;
-                undo.epSquare = b.epSquare;
-                undo.halfMoveClock = b.halfMoveClock;
-                undo.capturedPiece = NO_PIECE;
-                undo.capturedSq = NO_SQ;
-                undo.mgScore = b.mgScore;
-                undo.egScore = b.egScore;
-                undo.phase = b.phase;
+                const U64 savedHash = b.hash;
+                const int savedEp = b.epSquare;
+                const int savedClock = b.halfMoveClock;
 
                 if (b.epSquare != NO_SQ) b.hash ^= ZOBRIST_EP[b.epSquare % 8];
                 b.epSquare = NO_SQ;
                 b.sideToMove = 1 - b.sideToMove;
                 b.hash ^= ZOBRIST_SIDE;
+                b.halfMoveClock = 0;   // a null move is irreversible for repetition purposes
 
-                int nullScore = -alphaBeta(b, depth - 1 - R, -beta, -beta + 1, info, false);
+                history.push_back(b.hash);
+                int nullScore = -alphaBeta(b, depth - 1 - R, ply + 1, -beta, -beta + 1,
+                    info, history, false);
+                history.pop_back();
 
                 // Restore board state
-                b.hash = undo.hash;
-                b.epSquare = undo.epSquare;
+                b.hash = savedHash;
+                b.epSquare = savedEp;
+                b.halfMoveClock = savedClock;
                 b.sideToMove = 1 - b.sideToMove;
 
-                if (nullScore >= beta) return beta;
+                if (info.stop.load(std::memory_order_relaxed)) return 0;
+                // A mate score returned through a null move is not trustworthy.
+                if (nullScore >= beta && !isMateScore(nullScore)) return beta;
             }
 
             MoveList ml;
@@ -1361,43 +1485,48 @@ namespace stockparrot {
                 Board nb = b;
                 if (!makeMove(nb, ml.moves[i])) continue;
                 legalMoves++;
+                history.push_back(nb.hash);
 
                 int score;
                 if (legalMoves == 1) {
-                    score = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
+                    score = -alphaBeta(nb, depth - 1, ply + 1, -beta, -alpha, info, history);
                 }
                 else {
-                    score = -alphaBeta(nb, depth - 1, -alpha - 1, -alpha, info);
+                    score = -alphaBeta(nb, depth - 1, ply + 1, -alpha - 1, -alpha, info, history);
                     if (score > alpha && score < beta)
-                        score = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
+                        score = -alphaBeta(nb, depth - 1, ply + 1, -beta, -alpha, info, history);
                 }
+                history.pop_back();
                 if (info.stop.load(std::memory_order_relaxed)) return 0;
 
                 if (score > alpha) {
                     alpha = score;
                     bestMove = ml.moves[i];
                     if (score >= beta) {
-                        ttStore(b.hash, depth, beta, TT_BETA, bestMove);
+                        ttStore(b.hash, depth, ply, beta, TT_BETA, bestMove);
                         return beta;
                     }
                 }
             }
 
+            // No legal move: mate if in check, otherwise stalemate. The mate score
+            // encodes distance in plies so that shorter mates score higher and the
+            // engine actually converts won positions.
             if (legalMoves == 0)
-                return b.inCheck() ? -(MATE_SCORE - (info.nodes.load() % 100)) : 0;
+                return inCheck ? -(MATE_SCORE - ply) : 0;
 
-            ttStore(b.hash, depth, alpha, (alpha > origAlpha) ? TT_EXACT : TT_ALPHA, bestMove);
+            ttStore(b.hash, depth, ply, alpha, (alpha > origAlpha) ? TT_EXACT : TT_ALPHA, bestMove);
             return alpha;
         }
 
         // Helper thread: runs its own iterative deepening, sharing the TT and
         // SearchInfo with the main thread. Cross-pollinates the TT to help the
         // main thread find better moves faster (Lazy SMP).
-        void helperThread(Board boardCopy, SearchInfo& info, int maxDepth) {
+        void helperThread(Board boardCopy, std::vector<U64> history, SearchInfo& info, int maxDepth) {
             for (int depth = 1; depth <= maxDepth; depth++) {
                 if (info.stop.load(std::memory_order_relaxed)) break;
                 Move ttMove; int score;
-                ttProbe(boardCopy.hash, depth, -INF, INF, score, ttMove);
+                ttProbe(boardCopy.hash, depth, 0, -INF, INF, score, ttMove);
                 MoveList ml;
                 generateMoves(boardCopy, ml);
                 sortMoves(ml, ttMove);
@@ -1406,10 +1535,20 @@ namespace stockparrot {
                     if (info.stop.load(std::memory_order_relaxed)) return;
                     Board nb = boardCopy;
                     if (!makeMove(nb, ml.moves[i])) continue;
-                    int s = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
+                    history.push_back(nb.hash);
+                    int s = -alphaBeta(nb, depth - 1, 1, -beta, -alpha, info, history);
+                    history.pop_back();
                     if (s > alpha) alpha = s;
                 }
             }
+        }
+
+        // Formats a score as a UCI "score" field: mate distance in moves where the
+        // score is a forced mate, centipawns otherwise.
+        static std::string uciScore(int score) {
+            if (isMateScore(score))
+                return "mate " + std::to_string(mateDistance(score));
+            return "cp " + std::to_string(score);
         }
 
         Move searchBestMove(int timeLimitMs, int maxDepth, int threads = 1) {
@@ -1417,12 +1556,28 @@ namespace stockparrot {
             info.startTime = std::chrono::steady_clock::now();
             info.timeLimit = timeLimitMs;
 
+            // Terminal position: nothing to search. UCI expects the null move "0000".
+            {
+                MoveList ml;
+                generateMoves(board, ml);
+                bool any = false;
+                for (int i = 0; i < ml.count && !any; i++) {
+                    Board nb = board;
+                    if (makeMove(nb, ml.moves[i])) any = true;
+                }
+                if (!any) return NULL_MOVE;
+            }
+
+            std::vector<U64> rootHistory = gameHistory;
+            if (rootHistory.empty() || rootHistory.back() != board.hash)
+                rootHistory.push_back(board.hash);
+
             // Launch helper threads (Lazy SMP)
             std::vector<std::thread> helpers;
             helpers.reserve(threads - 1);
             for (int t = 1; t < threads; t++)
-                helpers.emplace_back([this, &info, maxDepth]() {
-                helperThread(board, info, maxDepth);
+                helpers.emplace_back([this, &info, maxDepth, rootHistory]() {
+                helperThread(board, rootHistory, info, maxDepth);
                     });
 
             std::vector<std::pair<int, Move>> rootMoves;
@@ -1431,7 +1586,7 @@ namespace stockparrot {
 
             for (int depth = 1; depth <= maxDepth; depth++) {
                 Move ttMove; int score;
-                if (!ttProbe(board.hash, depth, -INF, INF, score, ttMove)) ttMove = bestMove;
+                if (!ttProbe(board.hash, depth, 0, -INF, INF, score, ttMove)) ttMove = bestMove;
 
                 MoveList ml;
                 generateMoves(board, ml);
@@ -1443,7 +1598,9 @@ namespace stockparrot {
                 for (int i = 0; i < ml.count; i++) {
                     Board nb = board;
                     if (!makeMove(nb, ml.moves[i])) continue;
-                    int s = -alphaBeta(nb, depth - 1, -beta, -alpha, info);
+                    rootHistory.push_back(nb.hash);
+                    int s = -alphaBeta(nb, depth - 1, 1, -beta, -alpha, info, rootHistory);
+                    rootHistory.pop_back();
                     if (info.stop.load(std::memory_order_relaxed)) goto done;
                     current.push_back({ s, ml.moves[i] });
                     if (s > alpha) alpha = s;
@@ -1470,7 +1627,7 @@ namespace stockparrot {
                             " time " + std::to_string(elapsedMs.count()) +
                             " nodes " + std::to_string(totalNodes) +
                             " nps " + std::to_string(nps) +
-                            " score cp " + std::to_string(bestScore) +
+                            " score " + uciScore(bestScore) +
                             " pv " + bestMove.toString());
                     }
                     else {
@@ -1478,9 +1635,12 @@ namespace stockparrot {
                             << " time " << elapsedMs.count()
                             << " nodes " << totalNodes
                             << " nps " << nps
-                            << " score cp " << bestScore
+                            << " score " << uciScore(bestScore)
                             << " pv " << bestMove.toString() << "\n";
                     }
+                    // Stop only once the mate is proven shortest: a mate within the
+                    // depth just searched full-width cannot be beaten by a faster one.
+                    if (isMateScore(bestScore) && MATE_SCORE - std::abs(bestScore) <= depth) break;
                     if (elapsedMs.count() * 2 > timeLimitMs) break;
                 }
             }
@@ -1489,10 +1649,13 @@ namespace stockparrot {
             info.stop.store(true, std::memory_order_relaxed);
             for (auto& t : helpers) t.join();
 
-            // Pick randomly among moves within VARIETY_MARGIN cp of the best
+            // Pick randomly among moves within VARIETY_MARGIN cp of the best, but never
+            // trade away a forced mate or a shorter mate for the sake of variety.
+            if (isMateScore(bestScore)) return bestMove;
+
             std::vector<Move> candidates;
             for (auto& [s, m] : rootMoves)
-                if (s >= bestScore - VARIETY_MARGIN)
+                if (s >= bestScore - VARIETY_MARGIN && !isMateScore(s))
                     candidates.push_back(m);
 
             if (candidates.size() > 1) {
