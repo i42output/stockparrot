@@ -1599,7 +1599,12 @@ namespace stockparrot {
                     Board nb = board;
                     if (!makeMove(nb, ml.moves[i])) continue;
                     rootHistory.push_back(nb.hash);
-                    int s = -alphaBeta(nb, depth - 1, 1, -beta, -alpha, info, rootHistory);
+                    // Widen the lower bound by VARIETY_MARGIN so that every move within the
+                    // margin of the best gets an exact score; a fail-hard search against
+                    // -alpha alone returns exactly alpha for every refuted move, making them
+                    // indistinguishable from the best move to the variety selection below.
+                    const int lower = (alpha == -INF) ? -INF : alpha - VARIETY_MARGIN - 1;
+                    int s = -alphaBeta(nb, depth - 1, 1, -beta, -lower, info, rootHistory);
                     rootHistory.pop_back();
                     if (info.stop.load(std::memory_order_relaxed)) goto done;
                     current.push_back({ s, ml.moves[i] });
