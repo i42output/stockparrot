@@ -24,4 +24,5 @@ This is my first vibe coding "experiment" - I will find out how much the AIs hav
 
 TODO: unit tests.
 
-<img width="1013" height="343" alt="image" src="https://github.com/user-attachments/assets/38c5fd63-0d48-44dd-b472-b49c6d88d68a" />
+<img width="1126" height="385" alt="image" src="https://github.com/user-attachments/assets/2a0bc132-a5f5-4411-8c04-90f80bc829a7" />
+
