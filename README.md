@@ -21,3 +21,5 @@ This is my first vibe coding "experiment" - I will find out how much the AIs hav
 * 15 (2026-09-26, Claude Opus 5.5 Medium): Bugfixes.
 
 TODO: unit tests.
+
+<img width="1013" height="343" alt="image" src="https://github.com/user-attachments/assets/38c5fd63-0d48-44dd-b472-b49c6d88d68a" />
