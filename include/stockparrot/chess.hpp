@@ -33,10 +33,13 @@ misrepresented as being the original software.
  *  - Full legal move generation (including castling, en passant, promotions)
  *  - Alpha-beta / NegaScout search with iterative deepening
  *  - Quiescence search
- *  - Tapered evaluation with PST, pawn structure, mobility, king safety
- *  - Late move reductions
- *  - Move ordering (TT move, captures by MVV-LVA, promotions, killers, history)
- *  - Transposition table with cache-line alignment
+ *  - Tapered evaluation with PeSTO PSTs, pawn structure, mobility, king safety
+ *  - Late move reductions, null move, reverse futility, futility, late move
+ *    and SEE pruning; check extension; internal iterative reduction
+ *  - Aspiration windows at the root
+ *  - Static exchange evaluation (capture ordering, quiescence pruning)
+ *  - Move ordering (TT move, captures by MVV-LVA/SEE, promotions, killers, history)
+ *  - Transposition table with cache-line alignment and depth/age replacement
  *  - Lazy SMP multithreading
  *  - UCI protocol support
  */
@@ -94,7 +97,6 @@ namespace stockparrot {
     // Any |score| at or above this is a forced mate; the gap encodes distance in plies.
     inline constexpr int MATE_IN_MAX = MATE_SCORE - MAX_PLY;
     inline constexpr int TT_SIZE = 1 << 20;
-    inline constexpr int VARIETY_MARGIN = 15;
 
     inline const std::string SQ_NAMES[] = {
         "a1","b1","c1","d1","e1","f1","g1","h1",
@@ -336,121 +338,127 @@ namespace stockparrot {
     // ─── Evaluation constants ─────────────────────────────────────────────────────
 
     inline constexpr int PIECE_VALUES[6] = { 100, 320, 330, 500, 900, 20000 };
+    // Material values used by the evaluation (PeSTO, Ronald Friederich); PIECE_VALUES
+    // above remains the scale for move ordering and exchange evaluation.
+    inline constexpr int MG_VALUE[6] = { 82, 337, 365, 477, 1025, 0 };
+    inline constexpr int EG_VALUE[6] = { 94, 281, 297, 512, 936, 0 };
     inline constexpr int PHASE_WEIGHTS[6] = { 0, 1, 1, 2, 4, 0 };
     inline constexpr int TOTAL_PHASE = 24;
 
+    // Piece-square tables (PeSTO), laid out visually: index 0 is a8, index 63 is h1.
+    // White indexes them with mirrorSquare(sq), black with sq directly.
     inline constexpr int PST_MG[6][64] = {
         // PAWN
-        {  0,  0,  0,  0,  0,  0,  0,  0,
-          50, 50, 50, 50, 50, 50, 50, 50,
-          10, 10, 20, 30, 30, 20, 10, 10,
-           5,  5, 10, 25, 25, 10,  5,  5,
-           0,  0,  0, 20, 20,  0,  0,  0,
-           5, -5,-10,  0,  0,-10, -5,  5,
-           5, 10, 10,-20,-20, 10, 10,  5,
-           0,  0,  0,  0,  0,  0,  0,  0 },
-           // KNIGHT
-           { -50,-40,-30,-30,-30,-30,-40,-50,
-             -40,-20,  0,  0,  0,  0,-20,-40,
-             -30,  0, 10, 15, 15, 10,  0,-30,
-             -30,  5, 15, 20, 20, 15,  5,-30,
-             -30,  0, 15, 20, 20, 15,  0,-30,
-             -30,  5, 10, 15, 15, 10,  5,-30,
-             -40,-20,  0,  5,  5,  0,-20,-40,
-             -50,-40,-30,-30,-30,-30,-40,-50 },
-             // BISHOP
-             { -20,-10,-10,-10,-10,-10,-10,-20,
-               -10,  0,  0,  0,  0,  0,  0,-10,
-               -10,  0,  5, 10, 10,  5,  0,-10,
-               -10,  5,  5, 10, 10,  5,  5,-10,
-               -10,  0, 10, 10, 10, 10,  0,-10,
-               -10, 10, 10, 10, 10, 10, 10,-10,
-               -10,  5,  0,  0,  0,  0,  5,-10,
-               -20,-10,-10,-10,-10,-10,-10,-20 },
-               // ROOK
-               {  0,  0,  0,  0,  0,  0,  0,  0,
-                  5, 10, 10, 10, 10, 10, 10,  5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                  0,  0,  0,  5,  5,  0,  0,  0 },
-                  // QUEEN
-                  { -20,-10,-10, -5, -5,-10,-10,-20,
-                    -10,  0,  0,  0,  0,  0,  0,-10,
-                    -10,  0,  5,  5,  5,  5,  0,-10,
-                     -5,  0,  5,  5,  5,  5,  0, -5,
-                      0,  0,  5,  5,  5,  5,  0, -5,
-                    -10,  5,  5,  5,  5,  5,  0,-10,
-                    -10,  0,  5,  0,  0,  0,  0,-10,
-                    -20,-10,-10, -5, -5,-10,-10,-20 },
-                    // KING middlegame
-                    { -30,-40,-40,-50,-50,-40,-40,-30,
-                      -30,-40,-40,-50,-50,-40,-40,-30,
-                      -30,-40,-40,-50,-50,-40,-40,-30,
-                      -30,-40,-40,-50,-50,-40,-40,-30,
-                      -20,-30,-30,-40,-40,-30,-30,-20,
-                      -10,-20,-20,-20,-20,-20,-20,-10,
-                       20, 20,  0,  0,  0,  0, 20, 20,
-                       20, 30, 10,  0,  0, 10, 30, 20 }
+        {   0,   0,   0,   0,   0,   0,  0,   0,
+           98, 134,  61,  95,  68, 126, 34, -11,
+           -6,   7,  26,  31,  65,  56, 25, -20,
+          -14,  13,   6,  21,  23,  12, 17, -23,
+          -27,  -2,  -5,  12,  17,   6, 10, -25,
+          -26,  -4,  -4, -10,   3,   3, 33, -12,
+          -35,  -1, -20, -23, -15,  24, 38, -22,
+            0,   0,   0,   0,   0,   0,  0,   0 },
+        // KNIGHT
+        { -167, -89, -34, -49,  61, -97, -15, -107,
+           -73, -41,  72,  36,  23,  62,   7,  -17,
+           -47,  60,  37,  65,  84, 129,  73,   44,
+            -9,  17,  19,  53,  37,  69,  18,   22,
+           -13,   4,  16,  13,  28,  19,  21,   -8,
+           -23,  -9,  12,  10,  19,  17,  25,  -16,
+           -29, -53, -12,  -3,  -1,  18, -14,  -19,
+          -105, -21, -58, -33, -17, -28, -19,  -23 },
+        // BISHOP
+        { -29,   4, -82, -37, -25, -42,   7,  -8,
+          -26,  16, -18, -13,  30,  59,  18, -47,
+          -16,  37,  43,  40,  35,  50,  37,  -2,
+           -4,   5,  19,  50,  37,  37,   7,  -2,
+           -6,  13,  13,  26,  34,  12,  10,   4,
+            0,  15,  15,  15,  14,  27,  18,  10,
+            4,  15,  16,   0,   7,  21,  33,   1,
+          -33,  -3, -14, -21, -13, -12, -39, -21 },
+        // ROOK
+        {  32,  42,  32,  51, 63,  9,  31,  43,
+           27,  32,  58,  62, 80, 67,  26,  44,
+           -5,  19,  26,  36, 17, 45,  61,  16,
+          -24, -11,   7,  26, 24, 35,  -8, -20,
+          -36, -26, -12,  -1,  9, -7,   6, -23,
+          -45, -25, -16, -17,  3,  0,  -5, -33,
+          -44, -16, -20,  -9, -1, 11,  -6, -71,
+          -19, -13,   1,  17, 16,  7, -37, -26 },
+        // QUEEN
+        { -28,   0,  29,  12,  59,  44,  43,  45,
+          -24, -39,  -5,   1, -16,  57,  28,  54,
+          -13, -17,   7,   8,  29,  56,  47,  57,
+          -27, -27, -16, -16,  -1,  17,  -2,   1,
+           -9, -26,  -9, -10,  -2,  -4,   3,  -3,
+          -14,   2, -11,  -2,  -5,   2,  14,   5,
+          -35,  -8,  11,   2,   8,  15,  -3,   1,
+           -1, -18,  -9,  10, -15, -25, -31, -50 },
+        // KING
+        { -65,  23,  16, -15, -56, -34,   2,  13,
+           29,  -1, -20,  -7,  -8,  -4, -38, -29,
+           -9,  24,   2, -16, -20,   6,  22, -22,
+          -17, -20, -12, -27, -30, -25, -14, -36,
+          -49,  -1, -27, -39, -46, -44, -33, -51,
+          -14, -14, -22, -46, -44, -30, -15, -27,
+            1,   7,  -8, -64, -43, -16,   9,   8,
+          -15,  36,  12, -54,   8, -28,  24,  14 }
     };
 
     inline constexpr int PST_EG[6][64] = {
         // PAWN
-        {  0,  0,  0,  0,  0,  0,  0,  0,
-          80, 80, 80, 80, 80, 80, 80, 80,
-          50, 50, 50, 50, 50, 50, 50, 50,
-          30, 30, 30, 30, 30, 30, 30, 30,
-          20, 20, 20, 20, 20, 20, 20, 20,
-          10, 10, 10, 10, 10, 10, 10, 10,
-          10, 10, 10, 10, 10, 10, 10, 10,
-           0,  0,  0,  0,  0,  0,  0,  0 },
-           // KNIGHT
-           { -50,-40,-30,-30,-30,-30,-40,-50,
-             -40,-20,  0,  0,  0,  0,-20,-40,
-             -30,  0, 10, 15, 15, 10,  0,-30,
-             -30,  5, 15, 20, 20, 15,  5,-30,
-             -30,  0, 15, 20, 20, 15,  0,-30,
-             -30,  5, 10, 15, 15, 10,  5,-30,
-             -40,-20,  0,  5,  5,  0,-20,-40,
-             -50,-40,-30,-30,-30,-30,-40,-50 },
-             // BISHOP
-             { -20,-10,-10,-10,-10,-10,-10,-20,
-               -10,  0,  0,  0,  0,  0,  0,-10,
-               -10,  0,  5, 10, 10,  5,  0,-10,
-               -10,  5,  5, 10, 10,  5,  5,-10,
-               -10,  0, 10, 10, 10, 10,  0,-10,
-               -10, 10, 10, 10, 10, 10, 10,-10,
-               -10,  5,  0,  0,  0,  0,  5,-10,
-               -20,-10,-10,-10,-10,-10,-10,-20 },
-               // ROOK
-               {  0,  0,  0,  0,  0,  0,  0,  0,
-                  5, 10, 10, 10, 10, 10, 10,  5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                 -5,  0,  0,  0,  0,  0,  0, -5,
-                  0,  0,  0,  5,  5,  0,  0,  0 },
-                  // QUEEN
-                  { -20,-10,-10, -5, -5,-10,-10,-20,
-                    -10,  0,  0,  0,  0,  0,  0,-10,
-                    -10,  0,  5,  5,  5,  5,  0,-10,
-                     -5,  0,  5,  5,  5,  5,  0, -5,
-                      0,  0,  5,  5,  5,  5,  0, -5,
-                    -10,  5,  5,  5,  5,  5,  0,-10,
-                    -10,  0,  5,  0,  0,  0,  0,-10,
-                    -20,-10,-10, -5, -5,-10,-10,-20 },
-                    // KING endgame
-                    { -50,-40,-30,-20,-20,-30,-40,-50,
-                      -30,-20,-10,  0,  0,-10,-20,-30,
-                      -30,-10, 20, 30, 30, 20,-10,-30,
-                      -30,-10, 30, 40, 40, 30,-10,-30,
-                      -30,-10, 30, 40, 40, 30,-10,-30,
-                      -30,-10, 20, 30, 30, 20,-10,-30,
-                      -30,-30,  0,  0,  0,  0,-30,-30,
-                      -50,-30,-30,-30,-30,-30,-30,-50 }
+        {   0,   0,   0,   0,   0,   0,   0,   0,
+          178, 173, 158, 134, 147, 132, 165, 187,
+           94, 100,  85,  67,  56,  53,  82,  84,
+           32,  24,  13,   5,  -2,   4,  17,  17,
+           13,   9,  -3,  -7,  -7,  -8,   3,  -1,
+            4,   7,  -6,   1,   0,  -5,  -1,  -8,
+           13,   8,   8,  10,  13,   0,   2,  -7,
+            0,   0,   0,   0,   0,   0,   0,   0 },
+        // KNIGHT
+        { -58, -38, -13, -28, -31, -27, -63, -99,
+          -25,  -8, -25,  -2,  -9, -25, -24, -52,
+          -24, -20,  10,   9,  -1,  -9, -19, -41,
+          -17,   3,  22,  22,  22,  11,   8, -18,
+          -18,  -6,  16,  25,  16,  17,   4, -18,
+          -23,  -3,  -1,  15,  10,  -3, -20, -22,
+          -42, -20, -10,  -5,  -2, -20, -23, -44,
+          -29, -51, -23, -15, -22, -18, -50, -64 },
+        // BISHOP
+        { -14, -21, -11,  -8, -7,  -9, -17, -24,
+           -8,  -4,   7, -12, -3, -13,  -4, -14,
+            2,  -8,   0,  -1, -2,   6,   0,   4,
+           -3,   9,  12,   9, 14,  10,   3,   2,
+           -6,   3,  13,  19,  7,  10,  -3,  -9,
+          -12,  -3,   8,  10, 13,   3,  -7, -15,
+          -14, -18,  -7,  -1,  4,  -9, -15, -27,
+          -23,  -9, -23,  -5, -9, -16,  -5, -17 },
+        // ROOK
+        {  13, 10, 18, 15, 12,  12,   8,   5,
+           11, 13, 13, 11, -3,   3,   8,   3,
+            7,  7,  7,  5,  4,  -3,  -5,  -3,
+            4,  3, 13,  1,  2,   1,  -1,   2,
+            3,  5,  8,  4, -5,  -6,  -8, -11,
+           -4,  0, -5, -1, -7, -12,  -8, -16,
+           -6, -6,  0,  2, -9,  -9, -11,  -3,
+           -9,  2,  3, -1, -5, -13,   4, -20 },
+        // QUEEN
+        {  -9,  22,  22,  27,  27,  19,  10,  20,
+          -17,  20,  32,  41,  58,  25,  30,   0,
+          -20,   6,   9,  49,  47,  35,  19,   9,
+            3,  22,  24,  45,  57,  40,  57,  36,
+          -18,  28,  19,  47,  31,  34,  39,  23,
+          -16, -27,  15,   6,   9,  17,  10,   5,
+          -22, -23, -30, -16, -16, -23, -36, -32,
+          -33, -28, -22, -43,  -5, -32, -20, -41 },
+        // KING
+        { -74, -35, -18, -18, -11,  15,   4, -17,
+          -12,  17,  14,  17,  17,  38,  23,  11,
+           10,  17,  23,  15,  20,  45,  44,  13,
+           -8,  22,  24,  27,  26,  33,  26,   3,
+          -18,  -4,  21,  24,  27,  23,   9, -11,
+          -19,  -3,  11,  21,  23,  16,   7,  -9,
+          -27, -11,   4,  13,  14,   4,  -5, -17,
+          -53, -34, -21, -11, -28, -14, -24, -43 }
     };
 
     inline int mirrorSquare(int sq) { return (7 - sq / 8) * 8 + sq % 8; }
@@ -527,9 +535,9 @@ namespace stockparrot {
             mailbox[sq] = piece;
             mailboxColor[sq] = color;
             const int sign = (color == WHITE) ? 1 : -1;
-            const int pstSq = (color == WHITE) ? sq : mirrorSquare(sq);
-            mgScore += sign * (PIECE_VALUES[piece] + PST_MG[piece][pstSq]);
-            egScore += sign * (PIECE_VALUES[piece] + PST_EG[piece][pstSq]);
+            const int pstSq = (color == WHITE) ? mirrorSquare(sq) : sq;
+            mgScore += sign * (MG_VALUE[piece] + PST_MG[piece][pstSq]);
+            egScore += sign * (EG_VALUE[piece] + PST_EG[piece][pstSq]);
             phase += PHASE_WEIGHTS[piece];
         }
 
@@ -540,9 +548,9 @@ namespace stockparrot {
             mailbox[sq] = NO_PIECE;
             mailboxColor[sq] = BOTH;
             const int sign = (color == WHITE) ? 1 : -1;
-            const int pstSq = (color == WHITE) ? sq : mirrorSquare(sq);
-            mgScore -= sign * (PIECE_VALUES[piece] + PST_MG[piece][pstSq]);
-            egScore -= sign * (PIECE_VALUES[piece] + PST_EG[piece][pstSq]);
+            const int pstSq = (color == WHITE) ? mirrorSquare(sq) : sq;
+            mgScore -= sign * (MG_VALUE[piece] + PST_MG[piece][pstSq]);
+            egScore -= sign * (EG_VALUE[piece] + PST_EG[piece][pstSq]);
             phase -= PHASE_WEIGHTS[piece];
         }
 
@@ -671,8 +679,11 @@ namespace stockparrot {
 
     struct MoveList {
         static constexpr int CAPACITY = 256;
-        Move moves[CAPACITY];
+        // In an anonymous union so that constructing a MoveList (once per node)
+        // does not default-initialise all CAPACITY moves; only [0, count) is used.
+        union { Move moves[CAPACITY]; };
         int  count = 0;
+        MoveList() {}
         void add(Move m) { if (count < CAPACITY) moves[count++] = m; }
     };
 
@@ -999,14 +1010,25 @@ namespace stockparrot {
 
             const U64 occ = b.occupied[BOTH];
             const U64 myOcc = b.occupied[color];
+            // King attack: weighted count of our piece attacks on the squares around
+            // the enemy king, turned into a middlegame penalty that grows
+            // quadratically once more than one piece joins in.
+            const int theirKing = b.kingSquare(them);
+            const U64 kingZone = (theirKing != NO_SQ) ? (KING_ATTACKS[theirKing] | setBit(theirKing)) : 0;
+            int attackers = 0, attackWeight = 0;
+            auto kingAttack = [&](U64 attacks, int weight) {
+                if (U64 hits = attacks & kingZone) { attackers++; attackWeight += weight * popcount(hits); }
+            };
             U64 kn = b.pieces[color][KNIGHT];
-            while (kn) { int sq = popLSBIdx(kn); int mv = popcount(KNIGHT_ATTACKS[sq] & ~myOcc);       mgScore += sign * (mv - 4) * 4; egScore += sign * (mv - 4) * 4; }
+            while (kn) { int sq = popLSBIdx(kn); U64 a = KNIGHT_ATTACKS[sq];     int mv = popcount(a & ~myOcc); mgScore += sign * (mv - 4) * 4;  egScore += sign * (mv - 4) * 4;  kingAttack(a, 2); }
             U64 bi = b.pieces[color][BISHOP];
-            while (bi) { int sq = popLSBIdx(bi); int mv = popcount(bishopAttacks(sq, occ) & ~myOcc);   mgScore += sign * (mv - 7) * 3; egScore += sign * (mv - 7) * 4; }
+            while (bi) { int sq = popLSBIdx(bi); U64 a = bishopAttacks(sq, occ); int mv = popcount(a & ~myOcc); mgScore += sign * (mv - 7) * 3;  egScore += sign * (mv - 7) * 4;  kingAttack(a, 2); }
             U64 ro = b.pieces[color][ROOK];
-            while (ro) { int sq = popLSBIdx(ro); int mv = popcount(rookAttacks(sq, occ) & ~myOcc);     mgScore += sign * (mv - 7) * 2; egScore += sign * (mv - 7) * 3; }
+            while (ro) { int sq = popLSBIdx(ro); U64 a = rookAttacks(sq, occ);   int mv = popcount(a & ~myOcc); mgScore += sign * (mv - 7) * 2;  egScore += sign * (mv - 7) * 3;  kingAttack(a, 3); }
             U64 qu = b.pieces[color][QUEEN];
-            while (qu) { int sq = popLSBIdx(qu); int mv = popcount(queenAttacks(sq, occ) & ~myOcc);    mgScore += sign * (mv - 14) * 1; egScore += sign * (mv - 14) * 2; }
+            while (qu) { int sq = popLSBIdx(qu); U64 a = queenAttacks(sq, occ);  int mv = popcount(a & ~myOcc); mgScore += sign * (mv - 14) * 1; egScore += sign * (mv - 14) * 2; kingAttack(a, 5); }
+            if (attackers >= 2 && b.pieces[color][QUEEN])
+                mgScore += sign * std::min(attackWeight * attackWeight, 500);
 
             int ks = b.kingSquare(color);
             if (ks != NO_SQ) {
@@ -1052,6 +1074,7 @@ namespace stockparrot {
         int    depth = 0;
         int    score = 0;
         TTFlag flag = TT_EXACT;
+        int    age = 0;         // search generation that wrote the entry
         Move   bestMove = {};
     };
 #ifdef _MSC_VER
@@ -1097,11 +1120,65 @@ namespace stockparrot {
             updateHistory(side, triedQuiets[i], -bonus);
     }
 
+    // ─── Static exchange evaluation ───────────────────────────────────────────────
+    // Material outcome (PIECE_VALUES scale) of the capture sequence on m.to that
+    // starts with m, both sides always recapturing with their least valuable piece
+    // and free to stop when continuing would lose material.
+
+    inline U64 attackersTo(const Board& b, int sq, U64 occ) {
+        const U64 bq = b.pieces[WHITE][BISHOP] | b.pieces[BLACK][BISHOP] | b.pieces[WHITE][QUEEN] | b.pieces[BLACK][QUEEN];
+        const U64 rq = b.pieces[WHITE][ROOK] | b.pieces[BLACK][ROOK] | b.pieces[WHITE][QUEEN] | b.pieces[BLACK][QUEEN];
+        return (PAWN_ATTACKS[BLACK][sq] & b.pieces[WHITE][PAWN])
+            | (PAWN_ATTACKS[WHITE][sq] & b.pieces[BLACK][PAWN])
+            | (KNIGHT_ATTACKS[sq] & (b.pieces[WHITE][KNIGHT] | b.pieces[BLACK][KNIGHT]))
+            | (KING_ATTACKS[sq] & (b.pieces[WHITE][KING] | b.pieces[BLACK][KING]))
+            | (bishopAttacks(sq, occ) & bq)
+            | (rookAttacks(sq, occ) & rq);
+    }
+
+    inline int see(const Board& b, const Move& m) {
+        const int to = m.to;
+        const U64 bq = b.pieces[WHITE][BISHOP] | b.pieces[BLACK][BISHOP] | b.pieces[WHITE][QUEEN] | b.pieces[BLACK][QUEEN];
+        const U64 rq = b.pieces[WHITE][ROOK] | b.pieces[BLACK][ROOK] | b.pieces[WHITE][QUEEN] | b.pieces[BLACK][QUEEN];
+        int gain[32];
+        int d = 0;
+        gain[0] = (m.captured == NO_PIECE) ? 0 : PIECE_VALUES[m.captured];
+        int attacker = m.piece;
+        int side = b.sideToMove;
+        U64 occ = b.occupied[BOTH] ^ setBit(m.from);
+        if (m.ep) occ ^= setBit(to + (side == WHITE ? -8 : 8));
+        U64 attackers = attackersTo(b, to, occ) & occ;
+        while (true) {
+            d++;
+            gain[d] = PIECE_VALUES[attacker] - gain[d - 1];
+            if (std::max(-gain[d - 1], gain[d]) < 0 || d == 31) break;
+            side = 1 - side;
+            const U64 mine = attackers & b.occupied[side];
+            if (!mine) break;
+            int p = PAWN;
+            while (!(mine & b.pieces[side][p])) p++;
+            // A king may only recapture if nothing defends the square.
+            if (p == KING && (attackers & b.occupied[1 - side])) break;
+            const U64 fromBB = mine & b.pieces[side][p];
+            occ ^= fromBB & (~fromBB + 1);
+            attackers = (attackers | (bishopAttacks(to, occ) & bq) | (rookAttacks(to, occ) & rq)) & occ;
+            attacker = p;
+        }
+        while (--d) gain[d - 1] = -std::max(-gain[d - 1], gain[d]);
+        return gain[0];
+    }
+
+    // Losing captures (by SEE) are ordered after the quiet moves.
+    inline int captureScore(const Board& b, const Move& m) {
+        const bool losing = PIECE_VALUES[m.captured] < PIECE_VALUES[m.piece] && see(b, m) < 0;
+        return (losing ? -500000 : 500000) + mvvLva(m.piece, m.captured);
+    }
+
     // ply < 0 means no killer/history context (quiescence): quiets score 0.
-    inline int scoreMove(const Move& m, const Move& ttMove, int ply = -1, int side = WHITE) {
+    inline int scoreMove(const Board& b, const Move& m, const Move& ttMove, int ply = -1, int side = WHITE) {
         if (m == ttMove)            return 1000000;
         if (m.promo == QUEEN)       return  900000;
-        if (m.captured != NO_PIECE) return  500000 + mvvLva(m.piece, m.captured);
+        if (m.captured != NO_PIECE) return captureScore(b, m);
         if (ply >= 0) {
             if (m == ordering.killers[ply][0]) return 400000;
             if (m == ordering.killers[ply][1]) return 390000;
@@ -1111,21 +1188,21 @@ namespace stockparrot {
     }
 
     // Scores each move once, then insertion-sorts descending (lists are short).
-    inline void sortMoves(MoveList& ml, const Move& ttMove, int ply = -1, int side = WHITE) {
-        int scores[MoveList::CAPACITY];
-        for (int i = 0; i < ml.count; i++) scores[i] = scoreMove(ml.moves[i], ttMove, ply, side);
+    // Sorts packed (score, index) keys rather than the moves themselves, then
+    // permutes the list once: far fewer bytes moved than shuffling Move objects.
+    inline void sortMoves(const Board& b, MoveList& ml, const Move& ttMove, int ply = -1, int side = WHITE) {
+        std::int64_t keys[MoveList::CAPACITY];
+        for (int i = 0; i < ml.count; i++)
+            keys[i] = (static_cast<std::int64_t>(scoreMove(b, ml.moves[i], ttMove, ply, side)) << 8) | (255 - i);
         for (int i = 1; i < ml.count; i++) {
-            const Move m = ml.moves[i];
-            const int  s = scores[i];
+            const std::int64_t k = keys[i];
             int j = i - 1;
-            while (j >= 0 && scores[j] < s) {
-                ml.moves[j + 1] = ml.moves[j];
-                scores[j + 1] = scores[j];
-                j--;
-            }
-            ml.moves[j + 1] = m;
-            scores[j + 1] = s;
+            while (j >= 0 && keys[j] < k) { keys[j + 1] = keys[j]; j--; }
+            keys[j + 1] = k;
         }
+        MoveList sorted;
+        for (int i = 0; i < ml.count; i++) sorted.moves[i] = ml.moves[255 - (keys[i] & 0xFF)];
+        std::copy(sorted.moves, sorted.moves + ml.count, ml.moves);
     }
 
     // ─── Draw detection ───────────────────────────────────────────────────────────
@@ -1170,8 +1247,9 @@ namespace stockparrot {
 
     struct SearchInfo {
         std::atomic<bool> stop{ false };
-        std::atomic<int>  nodes{ 0 };
-        int  timeLimit = 0;
+        std::atomic<long long> nodes{ 0 };
+        int  timeLimit = 0;     // hard limit: the search is aborted here
+        int  softLimit = 0;     // no new iteration is started after this
         std::chrono::time_point<std::chrono::steady_clock> startTime;
 
         bool timeUp() {
@@ -1194,7 +1272,12 @@ namespace stockparrot {
     struct Engine : uci::i_uci {
         Board                board;
         std::vector<TTEntry> tt;
+        int                  ttAge = 0;
         int                  numThreads = 1;
+        // Root moves scoring within this many centipawns of the best are picked at
+        // random. Costs strength (every root move needs a near-exact score), so off
+        // by default.
+        int                  varietyMargin = 0;
         // Zobrist keys of every position in the game so far, ending with `board`.
         // Required for repetition detection; without it the engine happily repeats
         // a won position or walks into a draw it could have avoided.
@@ -1289,6 +1372,7 @@ namespace stockparrot {
                 "id author i42output\n"
                 "option name Hash type spin default 1 min 1 max 4096\n"
                 "option name Threads type spin default 1 min 1 max 256\n"
+                "option name Variety type spin default 0 min 0 max 100\n"
                 "uciok");
         }
 
@@ -1316,6 +1400,9 @@ namespace stockparrot {
             else if (lower == "threads") {
                 numThreads = std::max(1, std::min(std::stoi(value), 256));
             }
+            else if (lower == "variety") {
+                varietyMargin = std::max(0, std::min(std::stoi(value), 100));
+            }
         }
 
         void position(uci::position const& pos, std::string const& moves) final {
@@ -1340,6 +1427,7 @@ namespace stockparrot {
             int timeLimit = 3000;
             int maxDepth = MAX_DEPTH;
             int wtimeVal = -1, btimeVal = -1;
+            int wincVal = 0, bincVal = 0;
 
             for (auto const& p : params) {
                 std::visit([&](auto const& v) {
@@ -1347,6 +1435,8 @@ namespace stockparrot {
                     if constexpr (std::is_same_v<T, uci::movetime>) timeLimit = v.value;
                     else if constexpr (std::is_same_v<T, uci::wtime>)    wtimeVal = v.value;
                     else if constexpr (std::is_same_v<T, uci::btime>)    btimeVal = v.value;
+                    else if constexpr (std::is_same_v<T, uci::winc>)     wincVal = v.value;
+                    else if constexpr (std::is_same_v<T, uci::binc>)     bincVal = v.value;
                     else if constexpr (std::is_same_v<T, uci::depth>)    maxDepth = v.value;
                     else if constexpr (std::is_same_v<T, uci::infinite>) timeLimit = 1 << 30;
                     }, p);
@@ -1354,14 +1444,20 @@ namespace stockparrot {
 
             bool hasMovetime = std::any_of(params.begin(), params.end(),
                 [](auto const& p) { return std::holds_alternative<uci::movetime>(p); });
+            // Soft limit: target time for this move; no new iteration starts after it.
+            // Hard limit: the search is aborted. Defaults to half/all of timeLimit.
+            int softLimit = timeLimit / 2;
             if (!hasMovetime) {
-                if (board.sideToMove == WHITE && wtimeVal > 0)
-                    timeLimit = std::max(100, wtimeVal / 30);
-                else if (board.sideToMove == BLACK && btimeVal > 0)
-                    timeLimit = std::max(100, btimeVal / 30);
+                const int myTime = (board.sideToMove == WHITE) ? wtimeVal : btimeVal;
+                const int myInc = (board.sideToMove == WHITE) ? wincVal : bincVal;
+                if (myTime > 0) {
+                    const int avail = std::max(1, myTime - 50);   // communication overhead
+                    timeLimit = std::max(1, std::min(avail / 3, (avail / 25 + myInc * 3 / 4) * 3));
+                    softLimit = std::min(timeLimit, avail / 25 + myInc * 3 / 4);
+                }
             }
 
-            Move best = searchBestMove(timeLimit, maxDepth, numThreads);
+            Move best = searchBestMove(timeLimit, maxDepth, numThreads, softLimit);
             // A terminal position yields the null move; UCI spells that "0000".
             const std::string bestStr = best.isNull() ? "0000" : best.toString();
             if (client) client->bestmove(*this, bestStr);
@@ -1401,8 +1497,14 @@ namespace stockparrot {
 
         // ── TT access ─────────────────────────────────────────────────────────────
 
+        // Replacement: an entry for a different position survives only if it was
+        // written by the current search at greater depth. A store without a best
+        // move keeps the one already known for the same position.
         void ttStore(U64 hash, int depth, int ply, int score, TTFlag flag, Move best) {
-            tt[hash % tt.size()] = { hash, depth, scoreToTT(score, ply), flag, best };
+            TTEntry& e = tt[hash % tt.size()];
+            if (e.hash != hash && e.age == ttAge && e.depth > depth) return;
+            if (best.isNull() && e.hash == hash) best = e.bestMove;
+            e = { hash, depth, scoreToTT(score, ply), flag, ttAge, best };
         }
 
         bool ttProbe(U64 hash, int depth, int ply, int alpha, int beta, int& score, Move& bestMove) {
@@ -1433,29 +1535,43 @@ namespace stockparrot {
             // it may be mated. Search every evasion, not just captures.
             const bool inCheck = b.inCheck();
 
+            Move ttMove; int ttScore;
+            if (ttProbe(b.hash, 0, ply, alpha, beta, ttScore, ttMove)) return ttScore;
+
+            int standPat = -INF;
             if (!inCheck) {
-                int standPat = evaluate(b);
+                standPat = evaluate(b);
                 if (standPat >= beta) return beta;
                 if (standPat > alpha) alpha = standPat;
             }
 
             MoveList ml;
             generateMoves(b, ml, !inCheck);
-            Move ttMove; int dummy;
-            ttProbe(b.hash, 0, ply, alpha, beta, dummy, ttMove);
-            sortMoves(ml, ttMove);
+            sortMoves(b, ml, ttMove);
 
+            const int origAlpha = alpha;
+            Move bestMove;
             int legalMoves = 0;
             for (int i = 0; i < ml.count; i++) {
+                const Move& m = ml.moves[i];
+                if (!inCheck && m.promo == NO_PIECE) {
+                    // Delta pruning: even winning the piece outright cannot raise alpha.
+                    if (standPat + PIECE_VALUES[m.captured] + 200 <= alpha) continue;
+                    // Captures that lose material by exchange are not worth searching.
+                    if (PIECE_VALUES[m.captured] < PIECE_VALUES[m.piece] && see(b, m) < 0) continue;
+                }
                 Board nb = b;
-                if (!makeMove(nb, ml.moves[i])) continue;
+                if (!makeMove(nb, m)) continue;
                 legalMoves++;
                 history.push_back(nb.hash);
                 int score = -quiescence(nb, ply + 1, -beta, -alpha, info, history);
                 history.pop_back();
                 if (info.stop.load(std::memory_order_relaxed)) return 0;
-                if (score >= beta) return beta;
-                if (score > alpha) alpha = score;
+                if (score >= beta) {
+                    ttStore(b.hash, 0, ply, beta, TT_BETA, m);
+                    return beta;
+                }
+                if (score > alpha) { alpha = score; bestMove = m; }
             }
 
             // Only meaningful when in check: we generated every move, so an empty
@@ -1463,6 +1579,7 @@ namespace stockparrot {
             // set says nothing and alpha (the stand pat) already holds.
             if (inCheck && legalMoves == 0) return -(MATE_SCORE - ply);
 
+            ttStore(b.hash, 0, ply, alpha, (alpha > origAlpha) ? TT_EXACT : TT_ALPHA, bestMove);
             return alpha;
         }
 
@@ -1484,22 +1601,43 @@ namespace stockparrot {
                 if (alpha >= beta) return alpha;
             }
 
+            // Check extension: never drop into quiescence while in check, and look
+            // one ply further along forcing lines.
+            const bool inCheck = b.inCheck();
+            if (inCheck) depth++;
+
             if (depth <= 0 || ply >= MAX_PLY) return quiescence(b, ply, alpha, beta, info, history);
 
+            const bool pvNode = beta - alpha > 1;
+
+            // Cut on the TT only at non-PV nodes, so the principal variation is
+            // always searched rather than truncated by a stale entry.
             Move ttMove; int ttScore;
-            if (ttProbe(b.hash, depth, ply, alpha, beta, ttScore, ttMove)) return ttScore;
+            if (ttProbe(b.hash, depth, ply, alpha, beta, ttScore, ttMove) && !pvNode) return ttScore;
+
+            // Internal iterative reduction: with no TT move to guide ordering, this
+            // node is likely to be searched poorly anyway; spend less on it.
+            if (depth >= 4 && ttMove.isNull()) depth--;
+
+            const int staticEval = inCheck ? -INF : evaluate(b);
+
+            // ── Reverse futility pruning ──────────────────────────────────────────
+            // Near the leaves, a static eval far above beta will almost surely hold.
+            if (!pvNode && !inCheck && depth <= 7 && !isMateScore(beta)
+                && staticEval - 80 * depth >= beta)
+                return beta;
 
             // ── Null move pruning ─────────────────────────────────────────────────
             // Skip in check, at low depth, or when we just did a null move.
             // Also skip in likely zugzwang positions (no major/minor pieces left).
-            const bool inCheck = b.inCheck();
             const bool hasPieces = b.pieces[b.sideToMove][KNIGHT]
                 | b.pieces[b.sideToMove][BISHOP]
                 | b.pieces[b.sideToMove][ROOK]
                 | b.pieces[b.sideToMove][QUEEN];
-            if (nullAllowed && !inCheck && hasPieces && depth >= 3 && !isMateScore(beta)) {
+            if (nullAllowed && !pvNode && !inCheck && hasPieces && depth >= 3 && !isMateScore(beta)
+                && staticEval >= beta) {
                 // Make null move: flip side to move, keep everything else
-                const int R = (depth >= 6) ? 3 : 2;  // reduction factor
+                const int R = 3 + depth / 4 + std::min((staticEval - beta) / 200, 3);  // reduction factor
                 const U64 savedHash = b.hash;
                 const int savedEp = b.epSquare;
                 const int savedClock = b.halfMoveClock;
@@ -1528,23 +1666,40 @@ namespace stockparrot {
 
             MoveList ml;
             generateMoves(b, ml);
-            sortMoves(ml, ttMove, ply, b.sideToMove);
+            sortMoves(b, ml, ttMove, ply, b.sideToMove);
 
             const int origAlpha = alpha;
-            const bool pvNode = beta - alpha > 1;
             Move bestMove;
             int  legalMoves = 0;
             Move triedQuiets[64];
             int  triedCount = 0;
+            int  quietsSeen = 0;
+
+            // Futility pruning: at shallow depth, quiet moves cannot lift a static
+            // eval this far below alpha.
+            const bool futile = !pvNode && !inCheck && depth <= 6 && !isMateScore(alpha)
+                && staticEval + 100 + 80 * depth <= alpha;
+            // Late move pruning: at shallow depth, only the first few quiet moves
+            // (by ordering) are worth trying.
+            const int lmpLimit = 3 + depth * depth;
 
             for (int i = 0; i < ml.count; i++) {
                 const Move& m = ml.moves[i];
+                const bool quiet = m.captured == NO_PIECE && m.promo == NO_PIECE;
+                if (quiet) quietsSeen++;
                 Board nb = b;
                 if (!makeMove(nb, m)) continue;
+                const bool givesCheck = nb.inCheck();
+                if (legalMoves > 0 && quiet && !givesCheck && !pvNode && !inCheck
+                    && (futile || (depth <= 5 && quietsSeen > lmpLimit)))
+                    continue;
+                // SEE pruning: at shallow depth skip moves that shed material by
+                // exchange (quiets onto attacked squares, losing captures).
+                if (legalMoves > 0 && !pvNode && !inCheck && !givesCheck && depth <= 6
+                    && m.promo == NO_PIECE && see(b, m) < (quiet ? -60 * depth : -100 * depth))
+                    continue;
                 legalMoves++;
                 history.push_back(nb.hash);
-
-                const bool quiet = m.captured == NO_PIECE && m.promo == NO_PIECE;
 
                 int score;
                 if (legalMoves == 1) {
@@ -1554,10 +1709,11 @@ namespace stockparrot {
                     // Late move reductions: quiet, non-killer moves late in the list
                     // are searched shallower; a fail-high re-searches at full depth.
                     int r = 0;
-                    if (depth >= 3 && legalMoves > 3 && quiet && !inCheck && !nb.inCheck()
+                    if (depth >= 3 && legalMoves > 3 && quiet && !inCheck && !givesCheck
                         && !(m == ordering.killers[ply][0]) && !(m == ordering.killers[ply][1])) {
                         r = static_cast<int>(0.75 + std::log(depth) * std::log(legalMoves) / 2.25);
                         if (pvNode) r--;
+                        r -= ordering.history[b.sideToMove][m.from][m.to] / 6000;
                         r = std::clamp(r, 0, depth - 2);
                     }
                     score = -alphaBeta(nb, depth - 1 - r, ply + 1, -alpha - 1, -alpha, info, history);
@@ -1603,7 +1759,7 @@ namespace stockparrot {
                 ttProbe(boardCopy.hash, depth, 0, -INF, INF, score, ttMove);
                 MoveList ml;
                 generateMoves(boardCopy, ml);
-                sortMoves(ml, ttMove, 0, boardCopy.sideToMove);
+                sortMoves(boardCopy, ml, ttMove, 0, boardCopy.sideToMove);
                 int alpha = -INF, beta = INF;
                 for (int i = 0; i < ml.count; i++) {
                     if (info.stop.load(std::memory_order_relaxed)) return;
@@ -1625,11 +1781,16 @@ namespace stockparrot {
             return "cp " + std::to_string(score);
         }
 
-        Move searchBestMove(int timeLimitMs, int maxDepth, int threads = 1) {
+        Move searchBestMove(int timeLimitMs, int maxDepth, int threads = 1, int softLimitMs = -1) {
             SearchInfo info;
             info.startTime = std::chrono::steady_clock::now();
             info.timeLimit = timeLimitMs;
-            clearOrdering();
+            info.softLimit = (softLimitMs < 0) ? timeLimitMs / 2 : softLimitMs;
+            ttAge++;
+            // Keep move-ordering statistics from the previous move, but decayed;
+            // killers are ply-relative and would be stale.
+            for (auto& byFrom : ordering.history) for (auto& byTo : byFrom) for (int& h : byTo) h /= 2;
+            for (auto& k : ordering.killers) k[0] = k[1] = Move{};
 
             // Terminal position: nothing to search. UCI expects the null move "0000".
             {
@@ -1665,32 +1826,87 @@ namespace stockparrot {
 
                 MoveList ml;
                 generateMoves(board, ml);
-                sortMoves(ml, ttMove, 0, board.sideToMove);
+                sortMoves(board, ml, ttMove, 0, board.sideToMove);
 
-                int alpha = -INF, beta = INF;
-                std::vector<std::pair<int, Move>> current;
-
-                for (int i = 0; i < ml.count; i++) {
-                    Board nb = board;
-                    if (!makeMove(nb, ml.moves[i])) continue;
-                    rootHistory.push_back(nb.hash);
-                    // Widen the lower bound by VARIETY_MARGIN so that every move within the
-                    // margin of the best gets an exact score; a fail-hard search against
-                    // -alpha alone returns exactly alpha for every refuted move, making them
-                    // indistinguishable from the best move to the variety selection below.
-                    const int lower = (alpha == -INF) ? -INF : alpha - VARIETY_MARGIN - 1;
-                    int s = -alphaBeta(nb, depth - 1, 1, -beta, -lower, info, rootHistory);
-                    rootHistory.pop_back();
-                    if (info.stop.load(std::memory_order_relaxed)) goto done;
-                    current.push_back({ s, ml.moves[i] });
-                    if (s > alpha) alpha = s;
+                // Aspiration window around the previous score, widened on failure.
+                // Variety needs a near-exact score for every root move, so it keeps
+                // the full-window search of each move instead of PVS.
+                const bool variety = varietyMargin > 0;
+                int delta = 25;
+                int aspAlpha = -INF, aspBeta = INF;
+                if (!variety && depth >= 5 && !isMateScore(bestScore)) {
+                    aspAlpha = bestScore - delta;
+                    aspBeta = bestScore + delta;
                 }
+                Move failHighMove;
 
-                if (!current.empty()) {
-                    rootMoves = current;
-                    bestScore = alpha;
-                    bestMove = std::max_element(rootMoves.begin(), rootMoves.end(),
-                        [](const auto& a, const auto& b) { return a.first < b.first; })->second;
+                while (true) {
+                    int alpha = aspAlpha;
+                    const int beta = aspBeta;
+                    std::vector<std::pair<int, Move>> current;
+                    Move iterBest;
+                    int legal = 0;
+                    bool stopped = false;
+
+                    for (int i = 0; i < ml.count; i++) {
+                        Board nb = board;
+                        if (!makeMove(nb, ml.moves[i])) continue;
+                        legal++;
+                        rootHistory.push_back(nb.hash);
+                        int s;
+                        if (variety) {
+                            // Widen the lower bound by the variety margin so that every move
+                            // within it of the best gets an exact score; a fail-hard search
+                            // against -alpha alone returns exactly alpha for every refuted
+                            // move, making them indistinguishable from the best move.
+                            const int lower = (alpha == -INF) ? -INF : alpha - varietyMargin - 1;
+                            s = -alphaBeta(nb, depth - 1, 1, -beta, -lower, info, rootHistory);
+                        }
+                        else if (legal == 1) {
+                            s = -alphaBeta(nb, depth - 1, 1, -beta, -alpha, info, rootHistory);
+                        }
+                        else {
+                            s = -alphaBeta(nb, depth - 1, 1, -alpha - 1, -alpha, info, rootHistory);
+                            if (s > alpha && s < beta)
+                                s = -alphaBeta(nb, depth - 1, 1, -beta, -alpha, info, rootHistory);
+                        }
+                        rootHistory.pop_back();
+                        if (info.stop.load(std::memory_order_relaxed)) { stopped = true; break; }
+                        current.push_back({ s, ml.moves[i] });
+                        if (s > alpha) { alpha = s; iterBest = ml.moves[i]; }
+                        if (alpha >= beta) break;
+                    }
+
+                    if (stopped) {
+                        // A move that completed and beat the window's lower bound is
+                        // better than the previous best (searched first); keep it.
+                        if (!iterBest.isNull()) bestMove = iterBest;
+                        else if (!failHighMove.isNull()) bestMove = failHighMove;
+                        goto done;
+                    }
+                    if (alpha <= aspAlpha && aspAlpha > -INF) {           // fail low
+                        delta *= 2;
+                        aspAlpha = (delta > 800) ? -INF : std::max(-INF, aspAlpha - delta);
+                        continue;
+                    }
+                    if (alpha >= aspBeta && aspBeta < INF) {              // fail high
+                        failHighMove = iterBest;
+                        // Search the move that failed high first on the re-search.
+                        for (int i = 0; i < ml.count; i++)
+                            if (ml.moves[i] == iterBest) { std::rotate(ml.moves, ml.moves + i, ml.moves + i + 1); break; }
+                        delta *= 2;
+                        aspBeta = (delta > 800) ? INF : std::min(INF, aspBeta + delta);
+                        continue;
+                    }
+                    if (!current.empty()) {
+                        rootMoves = current;
+                        bestScore = alpha;
+                        bestMove = variety
+                            ? std::max_element(rootMoves.begin(), rootMoves.end(),
+                                [](const auto& a, const auto& b) { return a.first < b.first; })->second
+                            : iterBest;
+                    }
+                    break;
                 }
 
                 {
@@ -1721,7 +1937,7 @@ namespace stockparrot {
                     // Stop only once the mate is proven shortest: a mate within the
                     // depth just searched full-width cannot be beaten by a faster one.
                     if (isMateScore(bestScore) && MATE_SCORE - std::abs(bestScore) <= depth) break;
-                    if (elapsedMs.count() * 2 > timeLimitMs) break;
+                    if (elapsedMs.count() > info.softLimit) break;
                 }
             }
         done:
@@ -1729,13 +1945,13 @@ namespace stockparrot {
             info.stop.store(true, std::memory_order_relaxed);
             for (auto& t : helpers) t.join();
 
-            // Pick randomly among moves within VARIETY_MARGIN cp of the best, but never
+            // Pick randomly among moves within varietyMargin cp of the best, but never
             // trade away a forced mate or a shorter mate for the sake of variety.
-            if (isMateScore(bestScore)) return bestMove;
+            if (varietyMargin == 0 || isMateScore(bestScore)) return bestMove;
 
             std::vector<Move> candidates;
             for (auto& [s, m] : rootMoves)
-                if (s >= bestScore - VARIETY_MARGIN && !isMateScore(s))
+                if (s >= bestScore - varietyMargin && !isMateScore(s))
                     candidates.push_back(m);
 
             if (candidates.size() > 1) {

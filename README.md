@@ -20,6 +20,7 @@ This is my first vibe coding "experiment" - I will find out how much the AIs hav
 * 14 (2026-08-14, Claude Opus 5 High): Bugfixes.
 * 15 (2026-09-26, Claude Opus 5.5 Medium): Bugfixes.
 * 16 (2026-09-27, Claude Opus 5.5 Medium): LMR/Killer
+* 17 (2026-09-27, Claude Opus 5.5): Strength: PST orientation fix, PeSTO tables, SEE, check extension, RFP/futility/LMP/SEE pruning, IIR, aspiration windows, TT replacement, time management, king attack. ~SF 2000 -> ~SF 2800 (Stockfish 16 UCI_Elo, 10s+0.1s).
 
 TODO: unit tests.
 
