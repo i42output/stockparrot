@@ -34,7 +34,8 @@ misrepresented as being the original software.
  *  - Alpha-beta / NegaScout search with iterative deepening
  *  - Quiescence search
  *  - Tapered evaluation with PST, pawn structure, mobility, king safety
- *  - Move ordering (TT move, captures by MVV-LVA, promotions)
+ *  - Late move reductions
+ *  - Move ordering (TT move, captures by MVV-LVA, promotions, killers, history)
  *  - Transposition table with cache-line alignment
  *  - Lazy SMP multithreading
  *  - UCI protocol support
@@ -44,6 +45,7 @@ misrepresented as being the original software.
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -1062,17 +1064,68 @@ namespace stockparrot {
         return PIECE_VALUES[victim] * 10 - PIECE_VALUES[attacker];
     }
 
-    inline int scoreMove(const Move& m, const Move& ttMove) {
+    // Quiet-move ordering state: two killer moves per ply and a butterfly history
+    // table. thread_local so each Lazy SMP thread orders from its own statistics.
+    inline constexpr int HISTORY_MAX = 16384;   // |history| stays within this bound
+
+    struct OrderingTables {
+        Move killers[MAX_PLY + 1][2] = {};
+        int  history[2][64][64] = {};
+    };
+    inline thread_local OrderingTables ordering;
+
+    inline void clearOrdering() { ordering = OrderingTables{}; }
+
+    // Gravity update: bonus shrinks as the entry approaches +/-HISTORY_MAX, so the
+    // table self-normalises without periodic halving.
+    inline void updateHistory(int side, const Move& m, int bonus) {
+        int& h = ordering.history[side][m.from][m.to];
+        h += bonus - h * std::abs(bonus) / HISTORY_MAX;
+    }
+
+    // A quiet move caused a beta cutoff: make it a killer, reward it, and penalise
+    // the quiet moves searched before it that failed to cut.
+    inline void updateQuietCutoff(const Move& m, int ply, int side, int depth,
+        const Move* triedQuiets, int triedCount) {
+        if (!(m == ordering.killers[ply][0])) {
+            ordering.killers[ply][1] = ordering.killers[ply][0];
+            ordering.killers[ply][0] = m;
+        }
+        const int bonus = std::min(depth * depth, 400);
+        updateHistory(side, m, bonus);
+        for (int i = 0; i < triedCount; i++)
+            updateHistory(side, triedQuiets[i], -bonus);
+    }
+
+    // ply < 0 means no killer/history context (quiescence): quiets score 0.
+    inline int scoreMove(const Move& m, const Move& ttMove, int ply = -1, int side = WHITE) {
         if (m == ttMove)            return 1000000;
         if (m.promo == QUEEN)       return  900000;
         if (m.captured != NO_PIECE) return  500000 + mvvLva(m.piece, m.captured);
+        if (ply >= 0) {
+            if (m == ordering.killers[ply][0]) return 400000;
+            if (m == ordering.killers[ply][1]) return 390000;
+            return ordering.history[side][m.from][m.to];
+        }
         return 0;
     }
 
-    inline void sortMoves(MoveList& ml, const Move& ttMove) {
-        std::sort(ml.moves, ml.moves + ml.count, [&](const Move& a, const Move& b) {
-            return scoreMove(a, ttMove) > scoreMove(b, ttMove);
-            });
+    // Scores each move once, then insertion-sorts descending (lists are short).
+    inline void sortMoves(MoveList& ml, const Move& ttMove, int ply = -1, int side = WHITE) {
+        int scores[MoveList::CAPACITY];
+        for (int i = 0; i < ml.count; i++) scores[i] = scoreMove(ml.moves[i], ttMove, ply, side);
+        for (int i = 1; i < ml.count; i++) {
+            const Move m = ml.moves[i];
+            const int  s = scores[i];
+            int j = i - 1;
+            while (j >= 0 && scores[j] < s) {
+                ml.moves[j + 1] = ml.moves[j];
+                scores[j + 1] = scores[j];
+                j--;
+            }
+            ml.moves[j + 1] = m;
+            scores[j + 1] = s;
+        }
     }
 
     // ─── Draw detection ───────────────────────────────────────────────────────────
@@ -1475,24 +1528,41 @@ namespace stockparrot {
 
             MoveList ml;
             generateMoves(b, ml);
-            sortMoves(ml, ttMove);
+            sortMoves(ml, ttMove, ply, b.sideToMove);
 
             const int origAlpha = alpha;
+            const bool pvNode = beta - alpha > 1;
             Move bestMove;
             int  legalMoves = 0;
+            Move triedQuiets[64];
+            int  triedCount = 0;
 
             for (int i = 0; i < ml.count; i++) {
+                const Move& m = ml.moves[i];
                 Board nb = b;
-                if (!makeMove(nb, ml.moves[i])) continue;
+                if (!makeMove(nb, m)) continue;
                 legalMoves++;
                 history.push_back(nb.hash);
+
+                const bool quiet = m.captured == NO_PIECE && m.promo == NO_PIECE;
 
                 int score;
                 if (legalMoves == 1) {
                     score = -alphaBeta(nb, depth - 1, ply + 1, -beta, -alpha, info, history);
                 }
                 else {
-                    score = -alphaBeta(nb, depth - 1, ply + 1, -alpha - 1, -alpha, info, history);
+                    // Late move reductions: quiet, non-killer moves late in the list
+                    // are searched shallower; a fail-high re-searches at full depth.
+                    int r = 0;
+                    if (depth >= 3 && legalMoves > 3 && quiet && !inCheck && !nb.inCheck()
+                        && !(m == ordering.killers[ply][0]) && !(m == ordering.killers[ply][1])) {
+                        r = static_cast<int>(0.75 + std::log(depth) * std::log(legalMoves) / 2.25);
+                        if (pvNode) r--;
+                        r = std::clamp(r, 0, depth - 2);
+                    }
+                    score = -alphaBeta(nb, depth - 1 - r, ply + 1, -alpha - 1, -alpha, info, history);
+                    if (r > 0 && score > alpha)
+                        score = -alphaBeta(nb, depth - 1, ply + 1, -alpha - 1, -alpha, info, history);
                     if (score > alpha && score < beta)
                         score = -alphaBeta(nb, depth - 1, ply + 1, -beta, -alpha, info, history);
                 }
@@ -1501,12 +1571,15 @@ namespace stockparrot {
 
                 if (score > alpha) {
                     alpha = score;
-                    bestMove = ml.moves[i];
+                    bestMove = m;
                     if (score >= beta) {
+                        if (quiet)
+                            updateQuietCutoff(m, ply, b.sideToMove, depth, triedQuiets, triedCount);
                         ttStore(b.hash, depth, ply, beta, TT_BETA, bestMove);
                         return beta;
                     }
                 }
+                if (quiet && triedCount < 64) triedQuiets[triedCount++] = m;
             }
 
             // No legal move: mate if in check, otherwise stalemate. The mate score
@@ -1523,13 +1596,14 @@ namespace stockparrot {
         // SearchInfo with the main thread. Cross-pollinates the TT to help the
         // main thread find better moves faster (Lazy SMP).
         void helperThread(Board boardCopy, std::vector<U64> history, SearchInfo& info, int maxDepth) {
+            clearOrdering();
             for (int depth = 1; depth <= maxDepth; depth++) {
                 if (info.stop.load(std::memory_order_relaxed)) break;
                 Move ttMove; int score;
                 ttProbe(boardCopy.hash, depth, 0, -INF, INF, score, ttMove);
                 MoveList ml;
                 generateMoves(boardCopy, ml);
-                sortMoves(ml, ttMove);
+                sortMoves(ml, ttMove, 0, boardCopy.sideToMove);
                 int alpha = -INF, beta = INF;
                 for (int i = 0; i < ml.count; i++) {
                     if (info.stop.load(std::memory_order_relaxed)) return;
@@ -1555,6 +1629,7 @@ namespace stockparrot {
             SearchInfo info;
             info.startTime = std::chrono::steady_clock::now();
             info.timeLimit = timeLimitMs;
+            clearOrdering();
 
             // Terminal position: nothing to search. UCI expects the null move "0000".
             {
@@ -1590,7 +1665,7 @@ namespace stockparrot {
 
                 MoveList ml;
                 generateMoves(board, ml);
-                sortMoves(ml, ttMove);
+                sortMoves(ml, ttMove, 0, board.sideToMove);
 
                 int alpha = -INF, beta = INF;
                 std::vector<std::pair<int, Move>> current;
