@@ -1781,6 +1781,36 @@ namespace stockparrot {
             return "cp " + std::to_string(score);
         }
 
+        // Principal variation as UCI moves: the best move followed by the best replies
+        // recorded in the TT, at most maxLength plies. Helper threads write the TT
+        // concurrently, so each TT move is only followed if it is legal in the position
+        // reached; the line also ends on a repeated position.
+        std::string pvString(const Move& best, int maxLength) {
+            std::string pv;
+            Board b = board;
+            std::vector<U64> seen{ b.hash };
+            Move next = best;
+            for (int ply = 0; ply < maxLength && !next.isNull(); ply++) {
+                MoveList ml;
+                generateMoves(b, ml);
+                Move played;
+                for (int i = 0; i < ml.count; i++) {
+                    if (!(ml.moves[i] == next)) continue;
+                    Board nb = b;
+                    if (makeMove(nb, ml.moves[i])) { played = ml.moves[i]; b = nb; }
+                    break;
+                }
+                if (played.isNull()) break;
+                if (!pv.empty()) pv += ' ';
+                pv += played.toString();
+                if (std::find(seen.begin(), seen.end(), b.hash) != seen.end()) break;
+                seen.push_back(b.hash);
+                const TTEntry e = tt[b.hash % tt.size()];
+                next = (e.hash == b.hash) ? e.bestMove : NULL_MOVE;
+            }
+            return pv;
+        }
+
         Move searchBestMove(int timeLimitMs, int maxDepth, int threads = 1, int softLimitMs = -1) {
             SearchInfo info;
             info.startTime = std::chrono::steady_clock::now();
@@ -1915,16 +1945,17 @@ namespace stockparrot {
                     long long totalNodes = info.nodes.load();
                     long long nps = elapsedMs.count() > 0 ? (totalNodes * 1000LL) / elapsedMs.count() : 0;
 
+                    const std::string pv = pvString(bestMove, depth);
                     if (client) {
                         client->info(*this, depth, elapsedMs, totalNodes, nps,
-                            bestScore, bestMove.toString());
+                            bestScore, pv);
                         client->response(*this,
                             "info depth " + std::to_string(depth) +
                             " time " + std::to_string(elapsedMs.count()) +
                             " nodes " + std::to_string(totalNodes) +
                             " nps " + std::to_string(nps) +
                             " score " + uciScore(bestScore) +
-                            " pv " + bestMove.toString());
+                            " pv " + pv);
                     }
                     else {
                         std::cerr << "info depth " << depth
@@ -1932,7 +1963,7 @@ namespace stockparrot {
                             << " nodes " << totalNodes
                             << " nps " << nps
                             << " score " << uciScore(bestScore)
-                            << " pv " << bestMove.toString() << "\n";
+                            << " pv " << pv << "\n";
                     }
                     // Stop only once the mate is proven shortest: a mate within the
                     // depth just searched full-width cannot be beaten by a faster one.
